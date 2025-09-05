@@ -1823,7 +1823,7 @@ function tryDistributeBankDog(s) {
   const ok = spawnMiner(s, lvl);
   if (ok) {
     s.autoDogBank = Math.max(0, (s.autoDogBank || 0) - 1);
-    setCenterPopup?.({ text: `🐶 Auto Dog (LV ${lvl})`, id: Math.random() });
+    setCenterPopup?.({ text: `🦊 Auto Dog (LV ${lvl})`, id: Math.random() });
     save?.();
   }
 }
@@ -2146,7 +2146,7 @@ function getHudModalText(k){
     case 'gold':
       return '🟡 GOLD xN increases the coins gained from each rock by 10% per upgrade.';
     case 'spawn':
-      return `🐶 LV shows the dog level that appears on purchase/bonus. 
+      return `🦊 LV shows the dog level that appears on purchase/bonus. 
 Increases automatically after 30 purchases.
 
 Purchases left to the next level: ${toNextLv}.`;
@@ -2155,7 +2155,7 @@ Purchases left to the next level: ${toNextLv}.`;
     case 'giftRing':
       return 'The ring around 🎁 shows progress to the next gift, based on the displayed timings.';
     case 'dogRing':
-      return 'The ring around 🐶 shows progress toward an auto-dog. When the bank is full (up to 6), it will deploy when a slot is free.';
+      return 'The ring around 🦊 shows progress toward an auto-dog. When the bank is full (up to 6), it will deploy when a slot is free.';
     default:
       return '';
   }
@@ -2488,7 +2488,7 @@ return (
               title={`Next Spawn Level in ${toNextLv} purchases`}
             >
               <span className="inline-flex items-baseline gap-1 leading-none">
-                <span>🐶 LV</span>
+                <span>🦊 LV</span>
                 <b className="leading-none">{stateRef.current?.spawnLevel || 1}</b>
                 <span className="text-[11px] leading-none opacity-80 relative -top-[1px]">
                   ({toNextLv})
@@ -2543,7 +2543,7 @@ return (
                 <div className="text-[22px] font-extrabold leading-none">🎁</div>
               </button>
 
-              {/* 🐶 ring */}
+              {/* 🦊 ring */}
               <button
                 onClick={()=>setHudModal('dogRing')}
                 className="relative w-8 h-8 rounded-full grid place-items-center hover:opacity-90 active:scale-95 transition"
@@ -2551,17 +2551,17 @@ return (
                 aria-label="Auto-dog info"
               >
                 <div className="absolute inset-0 rounded-full" style={ringBg(dogProgress)} />
-                <div className="text-[22px] font-extrabold leading-none">🐶</div>
+                <div className="text-[22px] font-extrabold leading-none">🦊</div>
               </button>
 
-{/* === [GAIN] button (RING like 🎁/🐶, same size) === */}
+{/* === [GAIN] button (RING like 🎁/🦊, same size) === */}
 <button
   onClick={() => setShowGainModal(true)}
   className="relative w-8 h-8 rounded-full grid place-items-center hover:opacity-90 active:scale-95 transition"
   title={`GAIN ${addRemainMs > 0 ? `in ${addRemainLabel}` : "ready"}`}
   aria-label="GAIN info"
 >
-  {/* טבעת ספירה בדיוק כמו 🎁/🐶 */}
+  {/* טבעת ספירה בדיוק כמו 🎁/🦊 */}
   <div className="absolute inset-0 rounded-full" style={ringBg(addProgress)} />
   {/* האייקון עצמו */}
   <div className="text-[20px] font-extrabold leading-none">▶️</div>
@@ -3044,7 +3044,7 @@ MLEO
         </div>
       )}
 
-      {/* HUD Info modal (Coins/DPS/GOLD/Spawn/Gifts/🎁/🐶) */}
+      {/* HUD Info modal (Coins/DPS/GOLD/Spawn/Gifts/🎁/🦊) */}
       {hudModal && (
         <div className="fixed inset-0 z-[10000] bg-black/80 flex items-center justify-center p-4">
           <div className="bg-white text-slate-900 max-w-sm w-full rounded-2xl p-6 shadow-2xl overflow-auto max-h-[85vh]">
