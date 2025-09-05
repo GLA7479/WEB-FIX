@@ -48,9 +48,9 @@ const LANES = 4;
 const SLOTS_PER_LANE = 4;
 const MAX_MINERS = LANES * SLOTS_PER_LANE;
 const PADDING = 6;
-const LS_KEY = "mleoMiners_v5_83_reset4";
+const LS_KEY = "mleoMiners_v5_83_reset5";
 // First–play terms acceptance gate (global versioned)
-const TERMS_VERSION = "v1.3"; // ⬅️ bump to force re-accept if text changes
+const TERMS_VERSION = "v1.4"; // ⬅️ bump to force re-accept if text changes
 const TERMS_KEY = `mleoMiners_termsAccepted_${TERMS_VERSION}`;
 
 // Assets
@@ -281,7 +281,7 @@ function getImg(src) {
 }
 
 // ===== Mining Economy Layer (safe, local-only) =====
-const MINING_LS_KEY = "mleoMiningEconomy_v2";
+const MINING_LS_KEY = "mleoMiningEconomy_v2.1";
 
 // —— Token & schedule (editable) ——
 const PRESALE_START_MS = null;               
@@ -2590,13 +2590,15 @@ return (
   {/* שורה ראשונה */}
   <div className="flex items-center gap-1">
     {/* האייקון קודם */}
-    <span
-      className="relative inline-grid place-items-center"
-      style={{ 
-        width: UI_SPAWN_ICON_BOX * 2.0,   // מגדיל את האייקון ב~40%
-        height: UI_SPAWN_ICON_BOX * 1.0 
-      }}
-    >
+   <span
+  className="relative inline-grid place-items-center"
+  style={{
+    width: UI_SPAWN_ICON_BOX * 2.0,
+    height: UI_SPAWN_ICON_BOX * 1.0,
+    marginLeft: -8,            // <<< הזזה שמאלה ~8px
+  }}
+>
+
       <img
         src={IMG_SPAWN_ICON}
         alt="dog"
@@ -2632,7 +2634,7 @@ return (
   disabled={!canBuyDps}
   className={`${BTN_BASE} ${BTN_H_FIX} ${BTN_W_FIX} ${
     canBuyDps
-      ? "bg-sky-500 hover:bg-sky-400 ring-sky-300 text-slate-900"
+? "bg-sky-500 hover:bg-sky-400 ring-sky-300 text-slate-900"
       : `bg-sky-500 ring-sky-300 text-slate-900 ${BTN_DIS}`
   }`}
 >
@@ -2654,13 +2656,18 @@ return (
   disabled={!canBuyGold}
   className={`${BTN_BASE} ${BTN_H_FIX} ${BTN_W_FIX} ${
     canBuyGold
-      ? "bg-amber-400 hover:bg-amber-300 ring-amber-300 text-slate-900"
+       ? "bg-amber-400 hover:bg-amber-300 ring-amber-300 text-slate-900"
       : `bg-amber-400 ring-amber-300 text-slate-900 ${BTN_DIS}`
   }`}
 >
   <div className="flex flex-col items-center justify-center leading-tight">
     <div className="flex items-center gap-1">
-      <span>🟡</span>
+      <img
+  src="/images/silver.png"
+  alt="Lio"
+  className="w-5 h-5 inline-block"
+/>
+
       <span>+10%</span>
     </div>
     <div className="!text-[14px] md:!text-[16px] mt-0.5 tabular-nums font-extrabold leading-tight">

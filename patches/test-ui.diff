@@ -1,0 +1,12 @@
+diff --git a/pages/mleo-miners.js b/pages/mleo-miners.js
+index abcdef0..abcdef1 100644
+--- a/pages/mleo-miners.js
++++ b/pages/mleo-miners.js
+@@ -1,7 +1,7 @@
+@@
+               className="px-5 py-3 font-bold rounded-lg text-base shadow bg-yellow-400 hover:bg-yellow-300 text-black"
+             >
+-              PLAY
++              PLAY TRY
+             </button>
+@@
