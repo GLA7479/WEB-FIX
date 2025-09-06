@@ -1,22 +1,77 @@
 // === START PART 1 ===
 
 // pages/mleo-miners.js
-// v5.8
+// v5.9-patches
 import { useEffect, useRef, useState } from "react";
 import Layout from "../components/Layout";
+import { useConnectModal, useAccountModal } from "@rainbow-me/rainbowkit";
+import { useAccount } from "wagmi";
+import { createPortal } from "react-dom";
+
+// --- Portal modal for iOS PWA tap issues ---
+function PortalModal({ open, children, z = 10000 }) {
+  if (!open || typeof window === "undefined") return null;
+  return createPortal(
+    <div className={`fixed inset-0 z-[${z}]`}>
+      {children}
+    </div>,
+    document.body
+  );
+}
+
+
+
+// --- iOS 100vh fix (sets --app-100vh = window.innerHeight) ---
+// --- iOS 100vh fix (sets --app-100vh = visual viewport height) ---
+function useIOSViewportFix() {
+  useEffect(() => {
+    const root = document.documentElement;
+    const vv = window.visualViewport;
+
+    const setVH = () => {
+      const h = vv ? vv.height : window.innerHeight;
+      root.style.setProperty("--app-100vh", `${Math.round(h)}px`);
+    };
+
+    // init + “התייצבות” אחרי שינוי אוריינטציה
+    const onOrient = () => requestAnimationFrame(() => setTimeout(setVH, 250));
+
+    setVH();
+    if (vv) {
+      vv.addEventListener("resize", setVH);
+      vv.addEventListener("scroll", setVH); // URL bar collapse/expand
+    }
+    window.addEventListener("orientationchange", onOrient);
+
+    return () => {
+      if (vv) {
+        vv.removeEventListener("resize", setVH);
+        vv.removeEventListener("scroll", setVH);
+      }
+      window.removeEventListener("orientationchange", onOrient);
+    };
+  }, []);
+}
+
+
 
 // ====== Config ======
 const LANES = 4;
 const SLOTS_PER_LANE = 4;
 const MAX_MINERS = LANES * SLOTS_PER_LANE;
 const PADDING = 6;
-const LS_KEY = "mleoMiners_v5_81_reset1";
+const LS_KEY = "mleoMiners_v5_83_reset5";
+// First–play terms acceptance gate (global versioned)
+const TERMS_VERSION = "v1.4"; // ⬅️ bump to force re-accept if text changes
+const TERMS_KEY = `mleoMiners_termsAccepted_${TERMS_VERSION}`;
 
 // Assets
 const IMG_BG    = "/images/bg-cave.png";
 const IMG_MINER = "/images/leo-miner-4x.png";
 const IMG_ROCK  = "/images/rock.png";
 const IMG_COIN  = "/images/silver.png";
+const IMG_TOKEN = "/images/coin3.png";
+const IMG_SPAWN_ICON = "/images/coin4.png";
 
 // SFX
 const S_CLICK = "/sounds/click.mp3";
@@ -24,12 +79,110 @@ const S_MERGE = "/sounds/merge.mp3";
 const S_ROCK  = "/sounds/rock.mp3";
 const S_GIFT  = "/sounds/gift.mp3";
 
+// ===== Debug helpers =====
+ const DEBUG_LS = "MLEO_DEBUG_UI";
+ const DEBUG_HOSTS = ["localhost","127.0.0.1","0.0.0.0"];
+ function getDebugFlag(){
+   try { return localStorage.getItem(DEBUG_LS) === "1"; } catch { return false; }
+ }
+ function setDebugFlag(on){
+   try { if(on) localStorage.setItem(DEBUG_LS,"1"); else localStorage.removeItem(DEBUG_LS); } catch {}
+ }
+ function isLocalHost(){
+   try { return DEBUG_HOSTS.includes(location.hostname); } catch { return false; }
+ }
+ try {
+   if (typeof window !== "undefined") {
+     const z = localStorage.getItem("SPAWN_ICON_ZOOM");
+     const y = localStorage.getItem("SPAWN_ICON_SHIFT_Y");
+     if (z) window.SPAWN_ICON_ZOOM = parseFloat(z);
+     if (y) window.SPAWN_ICON_SHIFT_Y = parseInt(y,10);
+   }
+ } catch {}
+ 
+
+// ===== UI constants =====
+const UI_BTN_H_PX = 48;         // גובה
+// show/hide floating RESET button (bottom-left on canvas)
+const SHOW_FLOATING_RESET = true; // ← שנה ל-false כדי להסתיר במהירות
+const UI_BTN_MIN_W_PX = 150;    // רוחב מינימלי לכל כפתור (התאם מספר)
+const UI_SPAWN_ICON_BOX = Math.round(UI_BTN_H_PX * 0.5);
+const UI_SPAWN_ICON_ZOOM =
+  (typeof window !== "undefined" && window.SPAWN_ICON_ZOOM) || 1.55;
+const UI_SPAWN_ICON_SHIFT_Y =
+  (typeof window !== "undefined" && window.SPAWN_ICON_SHIFT_Y) || 0;
+
+// ==== ACTION BUTTON fixed size (ADD / DPS / GOLD) ====
+const UI_ACTION_BTN_W_PX = 220; // רוחב אחיד לכל שלושת הכפתורים
+const UI_ACTION_BTN_H_PX = 64;  // גובה מעט גבוה כדי להכיל 2 שורות טקסט
+
+// מחלקות Tailwind (ערכים שרירותיים) מתוך הקבועים למעלה
+const BTN_W_FIX = `w-[${UI_ACTION_BTN_W_PX}px]`;
+const BTN_H_FIX = `h-[${UI_ACTION_BTN_H_PX}px]`;
+
+
 // Balance
 const BASE_DPS = 2;
 const LEVEL_DPS_MUL = 1.9;
 const ROCK_BASE_HP = 60;
 const ROCK_HP_MUL = 2.15;
 const GOLD_FACTOR = 0.12;
+
+// ===== Global gift phases (same for everyone) =====
+const GIFT_PHASES = [
+  { durSec: 30 * 60, intervalSec: 20 },
+  { durSec: 30 * 60, intervalSec: 30 },
+  { durSec: 30 * 60, intervalSec: 40 },
+  { durSec: 30 * 60, intervalSec: 50 },
+  { durSec: 60 * 60, intervalSec: 60 },
+];
+const GIFT_TOTAL_SEC = GIFT_PHASES.reduce((a, p) => a + p.durSec, 0);
+const GLOBAL_ANCHOR_MS = Date.UTC(2025, 0, 1, 0, 0, 0); // 2025-01-01 00:00:00Z
+
+function phaseAtGlobal(nowMs = Date.now()) {
+  const cyc = Math.floor((nowMs - GLOBAL_ANCHOR_MS) / 1000);
+  const mod = ((cyc % GIFT_TOTAL_SEC) + GIFT_TOTAL_SEC) % GIFT_TOTAL_SEC;
+  let acc = 0;
+  for (let i = 0; i < GIFT_PHASES.length; i++) {
+    const ph = GIFT_PHASES[i];
+    if (mod < acc + ph.durSec) {
+      const into = mod - acc;
+      const step = ph.intervalSec;
+      const remainToNextGiftSec = step - (into % step || step);
+      return { index:i, intervalSec: step, into, phaseRemainSec: ph.durSec - into, remainToNextGiftSec };
+    }
+    acc += ph.durSec;
+  }
+  const last = GIFT_PHASES[GIFT_PHASES.length - 1];
+  return { index: GIFT_PHASES.length - 1, intervalSec: last.intervalSec, into: 0, phaseRemainSec: last.durSec, remainToNextGiftSec: last.intervalSec };
+}
+
+// === Gift timing helpers (global-cycle based) ===
+function getPhaseInfo(s, now = Date.now()) {
+  const ph = phaseAtGlobal(now);
+  return {
+    index: ph.index,
+    into: ph.into,
+    remain: ph.remainToNextGiftSec,
+    intervalSec: ph.intervalSec,
+    phaseRemainSec: ph.phaseRemainSec,
+  };
+}
+
+// Vault display — זהה ל־MLEO button (2 ספרות + קיצור באותיות)
+function formatMleoVault(n) {
+  return formatMleoShort(n);
+}
+
+
+
+function currentGiftIntervalSec(s, now = Date.now()) {
+  const ph = phaseAtGlobal(now);
+  if (s) s.lastGiftIntervalSec = ph.intervalSec; // לשמירה לשכבת ה־HUD בלבד
+  return ph.intervalSec;
+}
+
+
 
 // פרסים
 const DIAMOND_PRIZES = [
@@ -47,15 +200,86 @@ function rollDiamondPrize() {
   return Math.random() < 0.5 ? "coins_x1000" : "dog+7";
 }
 
+
 // ===== Formatting =====
-const formatShort = (n) => {
-  const abs = Math.abs(n || 0);
-  if (abs >= 1e12) return (n / 1e12).toFixed(abs < 1e13 ? 1 : 0) + "T";
-  if (abs >= 1e9)  return (n / 1e9 ).toFixed(abs < 1e10 ? 1 : 0) + "B";
-  if (abs >= 1e6)  return (n / 1e6 ).toFixed(abs < 1e7  ? 1 : 0) + "M";
-  if (abs >= 1e3)  return (n / 1e3 ).toFixed(abs < 1e4  ? 1 : 0) + "K";
-  return String(Math.floor(n || 0));
-};
+
+// בסיס קיצורים (אלפים עד טריליון)
+const SUFFIXES_BASE = ["", "K", "M", "B", "T"];
+
+// ממפה דרגת אלפים לסיומת: 0→"" , 1→K, 2→M, 3→B, 4→T, 5→AA, 6→AB, ... עד אינסוף
+function suffixFromTier(tier) {
+  if (tier < SUFFIXES_BASE.length) return SUFFIXES_BASE[tier];
+  const idx = tier - SUFFIXES_BASE.length; // 0→AA, 1→AB ...
+  // ממיר למחרוזת אותיות בסגנון גיליון (A..Z, AA..), ומבריח ל-2+ אותיות
+  let n = idx + 26; // 26→"AA"
+  let s = "";
+  while (n >= 0) {
+    const q = Math.floor(n / 26) - 1;
+    const r = n - (q + 1) * 26;
+    s = String.fromCharCode(65 + r) + s;
+    n = q;
+  }
+  if (s.length === 1) s = "A" + s; // הבטח מינימום 2 תווים
+  return s;
+}
+
+// קיצור מספרים כללי עם 2 ספרות אחרי הנקודה (חיתוך, לא עיגול)
+function formatAbbrevInt(n) {
+  const sign = (n || 0) < 0 ? "-" : "";
+  const abs  = Math.abs(Number(n) || 0);
+  const p = 100; // 2 ספרות
+
+  if (abs < 1000) {
+    const t = Math.trunc(abs * p) / p;
+    return sign + t.toFixed(2);
+  }
+
+  let tier = Math.floor(Math.log10(abs) / 3); // 1=K, 2=M...
+  let div  = Math.pow(1000, tier);
+  let val  = abs / div;
+
+  // חיתוך ל-2 ספרות
+  let trimmed = Math.trunc(val * p) / p;
+
+  // נרמול קצה: 1000.00 → קפיצה לדרגה הבאה
+  if (trimmed >= 1000) {
+    tier += 1;
+    trimmed = 1;
+  }
+
+  return sign + trimmed.toFixed(2) + suffixFromTier(tier);
+}
+
+
+// שמירה על השם הקיים בקוד
+const formatShort = formatAbbrevInt;
+
+// MLEO — 3 ספרות אחרי הנקודה בכל טווח (בלי קיצור), חיתוך לא עיגול
+function formatMleo(n) {
+  const num = Number(n || 0);
+  const sign = num < 0 ? "-" : "";
+  const abs = Math.abs(num);
+  const p = 1000; // 3 ספרות
+  const t = Math.trunc(abs * p) / p;
+  return sign + t.toFixed(3);
+}
+
+// MLEO קצר — קיצור עם 2 ספרות (ל-HUD/טוסטים/פופאפים)
+function formatMleoShort(n) {
+  return formatAbbrevInt(n);
+}
+
+// MLEO — 2 ספרות אחרי הנקודה (חיתוך, לא עיגול)
+function formatMleo2(n) {
+  const num = Number(n || 0);
+  const sign = num < 0 ? "-" : "";
+  const abs = Math.abs(num);
+  const p = 100; // 2 ספרות
+  const t = Math.trunc(abs * p) / p;
+  return sign + t.toFixed(2);
+}
+
+
 
 // ===== Simple image cache =====
 const IMG_CACHE = {};
@@ -69,60 +293,203 @@ function getImg(src) {
 }
 
 // ===== Mining Economy Layer (safe, local-only) =====
-const MINING_LS_KEY = "mleoMiningEconomy_v1";
+const MINING_LS_KEY = "mleoMiningEconomy_v2.1";
+
+// —— Token & schedule (editable) ——
+const PRESALE_START_MS = null;               
+const PRESALE_DURATION_DAYS = 0;             
+const TGE_MS = null;                          
+
+const TOKEN_LIVE = false; // דמו: כבוי. הפוך ל-true רק כשהחוזה וה-ABI מחוברים
+
+// Claim unlock schedule (מצטבר): חודש 1=10%, 2=30%, 3=50%, 4=70%, 5=90%, 6+=100%
+const CLAIM_SCHEDULE = [
+  { monthFromTGE: 1, pct: 0.10 },
+  { monthFromTGE: 2, pct: 0.30 },
+  { monthFromTGE: 3, pct: 0.50 },
+  { monthFromTGE: 4, pct: 0.70 },
+  { monthFromTGE: 5, pct: 0.90 },
+  { monthFromTGE: 6, pct: 1.00 },
+];
+
+// —— Conversion & daily limit (editable) ——
+const MLEO_FROM_COINS_PCT = 0.01; // 1% from coins -> MLEO
+
+
+const SOFTCUT = [
+  { upto: 0.80, factor: 1.00 },
+  { upto: 1.00, factor: 0.50 },
+  { upto: 1.20, factor: 0.25 },
+  { upto: 9.99, factor: 0.10 },
+];
+
+const OFFLINE_DPS_FACTOR = 0.5;
+const IDLE_OFFLINE_MS = 5 * 60 * 1000; // 5 minutes without claiming gift => idle-offli
+
 const TOTAL_SUPPLY = 100_000_000_000; // 100B
 const DAYS = 1825;                     // 5y
 const DAILY_EMISSION = Math.floor(TOTAL_SUPPLY / DAYS);
-const DAILY_CAP = Math.floor(DAILY_EMISSION * 0.02); // 2% per player/day
+const DAILY_CAP = Math.floor(DAILY_EMISSION * 0.02);
 
+
+// ——— State I/O ———
 function getTodayKey(){ return new Date().toISOString().slice(0,10); }
 function loadMiningState(){
   try {
     const raw = localStorage.getItem(MINING_LS_KEY);
-    if (raw) return JSON.parse(raw);
+    if (raw) {
+      const st = JSON.parse(raw);
+      st.claimedTotal = st.claimedTotal || 0;
+      st.history = Array.isArray(st.history) ? st.history : [];
+      st.vault = st.vault || 0;
+      st.claimedToWallet = st.claimedToWallet || 0; // מצטבר ל־Wallet
+      return st;
+    }
   } catch {}
-  return { balance:0, minedToday:0, lastDay:getTodayKey(), scoreToday:0 };
+  return { balance:0, minedToday:0, lastDay:getTodayKey(), scoreToday:0, claimedTotal:0, history:[], vault:0, claimedToWallet:0 };
 }
 function saveMiningState(st){
   try { localStorage.setItem(MINING_LS_KEY, JSON.stringify(st)); } catch {}
 }
-function addPlayerScorePoints(_s, baseGoldEarned){
-  if(!baseGoldEarned || baseGoldEarned<=0) return;
+
+// ——— Terms helpers ———
+function isTermsAccepted() {
+  try { return localStorage.getItem(TERMS_KEY) === "yes"; } catch { return false; }
+}
+function acceptTerms() {
+  try { localStorage.setItem(TERMS_KEY, "yes"); } catch {}
+}
+
+// ——— Softcut helpers ———
+function softcutFactor(minedToday, dailyCap){
+  const used = dailyCap>0 ? minedToday / dailyCap : 0;
+  for (const seg of SOFTCUT){
+    if (used <= seg.upto) return seg.factor;
+  }
+  return 0.10;
+}
+
+// === REPLACE: previewMleoFromCoins / addPlayerScorePoints / finalizeDailyRewardOncePerTick ===
+const PREC = 2;
+const round3 = (x) => Number((x || 0).toFixed(PREC));
+
+function previewMleoFromCoins(coins){
+  if (!coins || coins<=0) return 0;
+  const st = loadMiningState();
+  const base   = (coins * MLEO_FROM_COINS_PCT);
+  const factor = softcutFactor(st.minedToday||0, DAILY_CAP);
+  let eff = base * factor;
+  const room = Math.max(0, (DAILY_CAP - (st.minedToday||0)));
+  eff = Math.min(eff, room);
+  return round3(eff);
+}
+
+function addPlayerScorePoints(_s, coinsFromRocks){
+  if(!coinsFromRocks || coinsFromRocks<=0) return;
   const st = loadMiningState();
   const today = getTodayKey();
   if(st.lastDay!==today){ st.minedToday=0; st.scoreToday=0; st.lastDay=today; }
-  st.scoreToday += baseGoldEarned;
+
+  const factor = softcutFactor(st.minedToday||0, DAILY_CAP);
+  const baseMleo = (coinsFromRocks * MLEO_FROM_COINS_PCT);
+  let eff = baseMleo * factor;
+  const room = Math.max(0, DAILY_CAP - (st.minedToday||0));
+  eff = Math.min(eff, room);
+
+  st.minedToday = round3((st.minedToday||0) + eff);
+  st.balance    = round3((st.balance||0)    + eff);
   saveMiningState(st);
 }
+
 function finalizeDailyRewardOncePerTick(){
   const st = loadMiningState();
   const today = getTodayKey();
   if(st.lastDay!==today) return;
-  if(st.scoreToday>0){
-    let reward = st.scoreToday;
-    if(reward>DAILY_CAP) reward = DAILY_CAP;
-    st.minedToday = reward;
-    st.balance += reward;
-    st.scoreToday = 0;
-    st.lastDay = today;
+  if((st.minedToday||0) > DAILY_CAP) {
+    const diff = round3((st.minedToday||0) - DAILY_CAP);
+    st.minedToday = round3(DAILY_CAP);
+    st.balance    = round3(Math.max(0, (st.balance||0) - diff));
     saveMiningState(st);
   }
 }
-function getMiningStats(){
-  const st = loadMiningState();
-  return { balance:st.balance, minedToday:st.minedToday, dailyCap:DAILY_CAP, dailyEmission:DAILY_EMISSION, lastDay:st.lastDay };
+
+
+
+// ——— Claim schedule logic ———
+function monthsSinceTGE(now=Date.now()){
+  if (!TGE_MS) return null;
+  if (now < TGE_MS) return -1;
+  const diff = now - TGE_MS;
+  return Math.floor(diff / (30*24*60*60*1000)); // חודש=30 יום
 }
+function currentClaimPct(now=Date.now()){
+  const m = monthsSinceTGE(now);
+  if (m===null || m<0) return 0;
+  let pct = 0;
+  for (const step of CLAIM_SCHEDULE){
+    if (m >= step.monthFromTGE) pct = Math.max(pct, step.pct);
+  }
+  return pct;
+}
+function walletClaimEnabled(now=Date.now()){
+  const m = monthsSinceTGE(now);
+  return TOKEN_LIVE && m!==null && m>=1; // מותר מחודש אחרי TGE
+}
+function remainingWalletClaimRoom(){
+  const st = loadMiningState();
+  const totalAccrued = (st.claimedTotal||0) + (st.vault||0) + (st.balance||0);
+  const pct = currentClaimPct();
+  const maxCumulative = Math.floor(totalAccrued * pct);
+  const already = st.claimedToWallet || 0;
+  return Math.max(0, maxCumulative - already);
+}
+
+// === helper components: TGE countdown + release bar ===
+
+function TgeCountdown() {
+  const [ts, setTs] = useState(Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setTs(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  if (!TGE_MS) return <div className="text-xs">TGE date not set.</div>;
+
+  const remain = Math.max(0, TGE_MS - ts);
+  if (remain === 0) return <div className="text-xs">TGE has started.</div>;
+
+  const d = Math.floor(remain / (24*3600*1000));
+  const h = Math.floor((remain % (24*3600*1000)) / (3600*1000));
+  const m = Math.floor((remain % (3600*1000)) / (60*1000));
+  const s = Math.floor((remain % (60*1000)) / 1000);
+  return <div className="text-sm">{d}d {h}h {m}m {s}s</div>;
+}
+
+function WalletReleaseBar() {
+  const pct = Math.round(currentClaimPct(Date.now()) * 100);
+  return (
+    <div className="w-full h-2 bg-white/60 rounded overflow-hidden mb-1">
+      <div className="h-2 bg-amber-500" style={{ width: `${pct}%` }} />
+    </div>
+  );
+}
+
 // === END PART 1 ===
 
 
-
 // === START PART 2 ===
+
 export default function MleoMiners() {
+  useIOSViewportFix();
   const wrapRef   = useRef(null);
   const canvasRef = useRef(null);
   const rafRef    = useRef(0);
   const dragRef   = useRef({ active:false });
   const stateRef  = useRef(null);
+  const flagsRef = useRef({ isMobileLandscape: false, paused: true });
+  const { openConnectModal } = useConnectModal();
+  const { openAccountModal } = useAccountModal();
+  const { isConnected } = useAccount();
 
   const [ui, setUi] = useState({
     gold: 0,
@@ -132,20 +499,21 @@ export default function MleoMiners() {
     muted: false,
   });
 
-  const [isPortrait, setIsPortrait] = useState(true);
   const [isDesktop,  setIsDesktop]  = useState(false);
   const [isMobileLandscape, setIsMobileLandscape] = useState(false);
 
   const [showIntro, setShowIntro] = useState(true);
-  const [playerName, setPlayerName] = useState("");
   const [gamePaused, setGamePaused] = useState(true);
+  const [showTerms, setShowTerms] = useState(false);
+  const [firstTimeNeedsTerms, setFirstTimeNeedsTerms] = useState(false);
+  const [showFullHistory, setShowFullHistory] = useState(false);
 
   const [showHowTo, setShowHowTo] = useState(false);
-  const [adWatching, setAdWatching] = useState(false);
-  // נשאיר הוק כדי לרנדר טיימר, אבל מקור האמת הוא stateRef.current.adCooldownUntil
+  const [showMiningInfo, setShowMiningInfo] = useState(false);
   const [adCooldownUntil, setAdCooldownUntil] = useState(0);
   const [showAdModal, setShowAdModal] = useState(false);
   const [adVideoEnded, setAdVideoEnded] = useState(false);
+  const [showMleoModal, setShowMleoModal] = useState(false);
 
   const [showCollect, setShowCollect] = useState(false);
 
@@ -154,76 +522,284 @@ export default function MleoMiners() {
 
   const [showDiamondInfo, setShowDiamondInfo] = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
-  const [showMiningStats, setShowMiningStats] = useState(false);
-
   const [mounted, setMounted] = useState(false);
+  const [debugUI, setDebugUI] = useState(false); // ← NEW
+
+  // === Mining HUD state (CLAIM) ===
+  const [mining, setMining] = useState({
+    balance: 0, minedToday: 0, lastDay: "", scoreToday: 0,
+    vault: 0, claimedTotal: 0, history: []
+  });
+  const [claiming, setClaiming] = useState(false); // ← הוסף את זה
+
+  // === PATCH: auto-open "How it works" (Mining) once per session ===
+  useEffect(() => {
+    if (showIntro) return;
+    try {
+      const K = "mleo_howitworks_seen";
+      if (sessionStorage.getItem(K) !== "1") {
+        setShowMiningInfo(true);
+        sessionStorage.setItem(K, "1");
+      }
+    } catch {}
+  }, [showIntro]);
+
+  // Check terms status on mount
+  useEffect(() => {
+    const accepted = isTermsAccepted();
+    setFirstTimeNeedsTerms(!accepted);
+    if (!accepted) {
+      // Do not auto-open modal here; we show a banner and gate PLAY/CONNECT.
+    }
+  }, []);
+
+  // ===== Debug UI bootstrap =====
+  useEffect(() => {
+    let on = false;
+    try {
+      const qs = new URLSearchParams(window.location.search);
+      if (qs.get("debug") === "1") on = true;
+    } catch {}
+    if (!on) on = getDebugFlag();
+    if (!on && isLocalHost()) on = true; // auto-enable on localhost
+    setDebugUI(on);
+    if (on) setDebugFlag(true);
+
+    // Shift+D toggle
+    const onKey = (e) => {
+      if (!e) return;
+      const k = (e.key || "").toLowerCase();
+      if (k === "d" && e.shiftKey) {
+        setDebugUI(v => { const nv = !v; setDebugFlag(nv); return nv; });
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+// === [GAIN] state & helpers (ADD) ===
+const [showGainModal, setShowGainModal] = useState(false);
+const [gainWatchEnabled, setGainWatchEnabled] = useState(false);
+
+// Bind to your real logic (timer/conditions). If no field exists yet, falls back to false.
+const gainReady = !!(stateRef.current && stateRef.current.gainReady);
+
+// “ring” matching the other icons (same sizing/ping behavior)
+const gainRingClass = gainReady
+  ? "animate-ping absolute inline-flex h-full w-full rounded-full bg-yellow-400/40"
+  : "absolute inline-flex h-full w-full rounded-full border border-white/20";
+
+function toggleGainWatch() {
+  setGainWatchEnabled(v => !v);
+  try { localStorage.setItem("mleo_gain_watch", (!gainWatchEnabled).toString()); } catch {}
+}
+
+useEffect(() => {
+  try {
+    const v = localStorage.getItem("mleo_gain_watch");
+    if (v === "true") setGainWatchEnabled(true);
+  } catch {}
+}, []);
+// === [GAIN] END state ===
+
+
+  // טוען/מרענן סטטוס ה־Mining
+  useEffect(() => {
+    if (!mounted) return;
+    try { setMining(loadMiningState()); } catch {}
+    const id = setInterval(() => {
+      try { setMining(loadMiningState()); } catch {}
+    }, 1000);
+    return () => clearInterval(id);
+  }, [mounted]);
+
+  // === DEMO handlers for Mining ===
+  function claimBalanceToVaultDemo() {
+    try { play?.(S_CLICK); } catch {}
+    const st  = loadMiningState();
+    const amt = Number((st?.balance || 0).toFixed(2));
+    if (!amt) { setGiftToastWithTTL("No tokens to claim"); return; }
+
+    st.vault        = Number(((st.vault || 0) + amt).toFixed(2));
+    st.claimedTotal = Number(((st.claimedTotal || 0) + amt).toFixed(2));
+    st.history      = Array.isArray(st.history) ? st.history : [];
+    st.history.unshift({ ts: Date.now(), amt, type: "to_vault" });
+    st.balance = 0;
+
+    saveMiningState(st);
+    setMining(st);
+    setGiftToastWithTTL(`Moved ${formatMleoShort(amt)} MLEO to Vault`);
+
+  }
+
+// === Unified Wallet Modal Opener ===
+function openWalletModalUnified() {
+  try { play?.(S_CLICK); } catch {}
+  if (firstTimeNeedsTerms) { 
+    setShowTerms(true); 
+    return; 
+  }
+  if (isConnected) {
+    openAccountModal?.();   // סטטוס מחובר + אפשרות ניתוק
+  } else {
+    openConnectModal?.();   // חיבור ארנק
+  }
+}
+
+
+  // כפתור CLAIM — דמו: תמיד Vault
+  async function onClaimMined() {
+    // מצב דמו בלבד
+    claimBalanceToVaultDemo();
+    return;
+
+    /* ================== ENABLE AFTER LAUNCH (Mainnet/Testnet) ==================
+      ... (הקוד העתידי נשאר כפי שהוא ומכובה ע"י ה-return המוקדם) ...
+    ============================================================================
+    */
+  }
+
+  // Debug live values for the panel (controlled inputs)
+  const [debugVals, setDebugVals] = useState({
+    minerScale: stateRef.current?.minerScale ?? 1.60,
+    minerWidth: stateRef.current?.minerWidth ?? 0.8,
+    spawnIconZoom:
+      (typeof window !== "undefined" && (window.SPAWN_ICON_ZOOM ?? Number(localStorage.getItem("SPAWN_ICON_ZOOM")))) || 1.5,
+    spawnIconShiftY:
+      (typeof window !== "undefined" && (window.SPAWN_ICON_SHIFT_Y ?? Number(localStorage.getItem("SPAWN_ICON_SHIFT_Y")))) || 0,
+  });
+
+  useEffect(() => {
+    if (!debugUI) return;
+    const s = stateRef.current || {};
+    const zoom = (typeof window !== "undefined" && (window.SPAWN_ICON_ZOOM ?? Number(localStorage.getItem("SPAWN_ICON_ZOOM")))) || 2.2;
+    const shift = (typeof window !== "undefined" && (window.SPAWN_ICON_SHIFT_Y ?? Number(localStorage.getItem("SPAWN_ICON_SHIFT_Y")))) || 0;
+    setDebugVals({
+      minerScale: s.minerScale ?? 1.6,
+      minerWidth: s.minerWidth ?? 0.8,
+      spawnIconZoom: Number(zoom) || 2.2,
+      spawnIconShiftY: Number(shift) || 0,
+    });
+  }, [debugUI]);
+
+  const [centerPopup, setCenterPopup] = useState(null);
 
   const uiPulseAccumRef = useRef(0);
+  const rockSfxCooldownRef = useRef(0);
   const [, forceUiPulse] = useState(0);
 
-  // סאונד
+  useEffect(() => {
+    flagsRef.current = {
+      isMobileLandscape,
+      paused: (gamePaused || showIntro || showCollect),
+    };
+  }, [isMobileLandscape, gamePaused, showIntro, showCollect]);
+
   const play = (src) => {
     if (ui.muted || !src) return;
     try { const a = new Audio(src); a.volume = 0.35; a.play().catch(()=>{}); } catch {}
   };
 
-  // ── סטאבים/עזר כדי שהקובץ ירוץ גם בלי תלויות חיצוניות ──
-  function theStateFix_maybeMigrateLocalStorage(){ /* no-op safe */ }
+  useEffect(() => {
+    if (!centerPopup) return;
+    const id = setTimeout(() => setCenterPopup(null), 1800);
+    return () => clearTimeout(id);
+  }, [centerPopup]);
 
-  function currentGiftIntervalSec(s){
-    return Math.max(5, Math.floor(s?.lastGiftIntervalSec || 20));
+  // ── מיגרציית שמירה קיימת ──
+  function theStateFix_maybeMigrateLocalStorage(){
+    try {
+      const K = LS_KEY;
+      const raw = localStorage.getItem(K);
+
+      const zLS = localStorage.getItem("SPAWN_ICON_ZOOM");
+      if (zLS === null || Number(zLS) !== 1.55) {
+        localStorage.setItem("SPAWN_ICON_ZOOM", "1.55");
+        if (typeof window !== "undefined") window.SPAWN_ICON_ZOOM = 1.55;
+      }
+
+      if (!raw) return;
+
+      const s = JSON.parse(raw);
+      let changed = false;
+
+      if (typeof s.minerScale !== "number" || s.minerScale !== 1.6) {
+        s.minerScale = 1.6; changed = true;
+      }
+      if (typeof s.minerWidth !== "number" || s.minerWidth !== 0.8) {
+        s.minerWidth = 0.8; changed = true;
+      }
+
+      if (changed) localStorage.setItem(K, JSON.stringify(s));
+    } catch {}
   }
 
-  function getPhaseInfo(s, now = Date.now()){
-    const sec = currentGiftIntervalSec(s);
-    return { index:0, into:0, remain:sec, intervalSec:sec };
-  }
-
-  // איסוף מתנה מרכזי (כפתור 🎁) — משתמש בחישוב מתנה לפי כל הסלעים (PART 4)
   function grantGift(){
-    const s = stateRef.current; if (!s) return;
-    const type = rollGiftType(); // PART 4
+  const s = stateRef.current; if (!s) return;
+  const type = rollGiftType(); // updated weights (no dog in regular gifts)
 
-    if (type === "coins") {
-      const base = Math.max(10, expectedGiftCoinReward(s)); // <<< שימוש בנוסחה החדשה
-      const gain = Math.round(base * 0.10); // 10%
-      s.gold += gain;
-      setUi(u => ({ ...u, gold: s.gold }));
-      setGiftToastWithTTL(`🎁 +${formatShort(gain)} coins`);
-    } else if (type === "dog") {
-      const lvl = chooseGiftDogLevel(s); // PART 4
-      trySpawnDogOrConvert(s, lvl);      // PART 4
-      setGiftToastWithTTL(`🎁 Free Dog (LV ${lvl})`);
-    } else if (type === "dps") {
-      s.dpsMult = +((s.dpsMult || 1) * 1.1).toFixed(3);
-      setGiftToastWithTTL(`🎁 DPS +10% (×${(s.dpsMult||1).toFixed(2)})`);
-    } else if (type === "gold") {
-      s.goldMult = +((s.goldMult || 1) * 1.1).toFixed(3);
-      setGiftToastWithTTL(`🎁 GOLD +10% (×${(s.goldMult||1).toFixed(2)})`);
-    }
+  if (type === "coins20") {
+    const base = Math.max(10, expectedGiftCoinReward(s));
+    const gain = Math.round(base * 0.20);
+    s.gold += gain;
+    setUi(u => ({ ...u, gold: s.gold }));
+    // בלי הצגת אחוזים
+    setCenterPopup({ text: `🎁 +${formatShort(gain)} coins`, id: Math.random() });
 
-    // קבע מתנה הבאה
-    s.giftReady = false;
-    s.giftNextAt = Date.now() + currentGiftIntervalSec(s) * 1000;
-    setGiftReadyFlag(false);
-    try { play(S_GIFT); } catch {}
-    save?.();
+  } else if (type === "coins40") {
+    const base = Math.max(10, expectedGiftCoinReward(s));
+    const gain = Math.round(base * 0.40);
+    s.gold += gain;
+    setUi(u => ({ ...u, gold: s.gold }));
+    // בלי הצגת אחוזים
+    setCenterPopup({ text: `🎁 +${formatShort(gain)} coins`, id: Math.random() });
+
+  } else if (type === "dps") {
+    s.dpsMult = +((s.dpsMult || 1) * 1.1).toFixed(2);
+    setCenterPopup({ text: `🎁 DPS +10% (×${(s.dpsMult||1).toFixed(2)})`, id: Math.random() });
+
+  } else if (type === "gold") {
+    s.goldMult = +((s.goldMult || 1) * 1.1).toFixed(2);
+    setCenterPopup({ text: `🎁 GOLD +10% (×${(s.goldMult||1).toFixed(2)})`, id: Math.random() });
+
+  } else if (type === "diamond") {
+    s.diamonds = (s.diamonds || 0) + 1;
+    setCenterPopup({ text: `🎁 +1 💎 (Diamonds: ${s.diamonds})`, id: Math.random() });
   }
+
+  s.giftReady = false;
+  {
+    const now = Date.now();
+    const stepSec = currentGiftIntervalSec(s, now);
+    s.giftNextAt = now + stepSec * 1000; // full interval after claim
+  }
+
+// reset idle timer & offline flag on claim
+    s.giftFirstReadyAt = null;
+    s.isIdleOffline = false;
+
+  setGiftReadyFlag(false);
+  try { play(S_GIFT); } catch {}
+  save?.();
+}
+
+
 // === END PART 2 ===
 
 
-
-
 // === START PART 3 ===
-// Init state + קנבס + ציור + לולאת משחק (שיפור UX של גרירה)
+
+/// Init state + קנבס + ציור + לולאת משחק (שיפור UX של גרירה)
 
 useEffect(() => {
   theStateFix_maybeMigrateLocalStorage();
-  // טען שמירה אם יש
+
   const loaded = loadSafe();
   const init = loaded ? { ...freshState(), ...loaded } : freshState();
 
-  // עוגן עלות ראשוני
+  if (loaded && loaded.minerScale == null) init.minerScale = 1.60;
+  if (loaded && loaded.minerWidth  == null) init.minerWidth  = 0.8;
+
   if (init.costBase == null) {
     try { init.costBase = Math.max(80, expectedRockCoinReward(init)); }
     catch { init.costBase = 120; }
@@ -234,20 +810,23 @@ useEffect(() => {
     gold: init.gold, spawnCost: init.spawnCost,
     dpsMult: init.dpsMult, goldMult: init.goldMult,
   }));
+  setGiftReadyFlag(!!init.giftReady);
 
-  // --- FIX: אם המתנה כבר הייתה מוכנה לפני הרענון, תרים את דגל ה־UI; ואם חסר טיימר – אתחל ---
   try {
-    if (init.giftReady && (init.giftNextAt || 0) <= Date.now()) {
-      setGiftReadyFlag(true);
-    }
+    const now = Date.now();
     if (!init.giftNextAt || Number.isNaN(init.giftNextAt)) {
-      init.giftNextAt = Date.now() + currentGiftIntervalSec(init) * 1000;
-      init.giftReady = false;
+      init.giftReady  = false;
+      const stepSec = currentGiftIntervalSec(init, now);
+      init.giftNextAt = now + stepSec * 1000;
       save();
+    }
+    if ((init.giftNextAt || 0) <= now) {
+      init.giftReady = true;
+      if (!init.giftFirstReadyAt) init.giftFirstReadyAt = now; // idle timer if already ready on load
+      setGiftReadyFlag(true);
     }
   } catch {}
 
-  // --- Load persisted ad cooldown so it doesn't reset on refresh ---
   try {
     const raw = localStorage.getItem(LS_KEY);
     if (raw) {
@@ -259,14 +838,13 @@ useEffect(() => {
     }
   } catch {}
 
-  // בדיקת OFFLINE כבר ב־mount
   try {
     const s = stateRef.current;
-    const now = Date.now();
+    const now  = Date.now();
     const last = s?.lastSeen || now;
     const elapsedMs = Math.max(0, now - last);
     if (elapsedMs > 1000) {
-      const gained = handleOfflineAccrual(s, elapsedMs); // PART 4
+      const gained = handleOfflineAccrual(s, elapsedMs); // PART 6
       if (gained > 0) setShowCollect(true);
       s.lastSeen = now;
       save();
@@ -275,11 +853,10 @@ useEffect(() => {
 
   setMounted(true);
 
-  // הגדרות מסך
   const updateFlags = () => {
     const w = window.innerWidth, h = window.innerHeight;
     const portrait = h >= w, desktop = w >= 1024;
-    setIsPortrait(portrait); setIsDesktop(desktop);
+    setIsDesktop(desktop);
     setIsMobileLandscape(!portrait && !desktop);
     setGamePaused(p => (!portrait && !desktop) ? true : (showIntro ? true : false));
   };
@@ -288,11 +865,9 @@ useEffect(() => {
   window.addEventListener("orientationchange", updateFlags);
   document.addEventListener("fullscreenchange", updateFlags);
 
-  // מנע גלילה כשגוררים על הקנבס
   const preventTouchScroll = (e) => { if (e.target.closest?.("#miners-canvas")) e.preventDefault(); };
   document.addEventListener("touchmove", preventTouchScroll, { passive:false });
 
-  // אם הקנבס עדיין לא בהרכבה – נסה שוב פריים הבא
   const c0 = canvasRef.current;
   if (!c0) {
     const id = requestAnimationFrame(() => canvasRef.current && setupCanvasAndLoop(canvasRef.current));
@@ -306,7 +881,6 @@ useEffect(() => {
   }
   const cleanup = setupCanvasAndLoop(c0);
 
-  // שמירת זמן יציאה / חזרה + צבירת OFFLINE
   const onVisibility = () => {
     const s = stateRef.current; if (!s) return;
     if (document.visibilityState === "hidden") {
@@ -315,7 +889,7 @@ useEffect(() => {
       const now = Date.now();
       const elapsedMs = Math.max(0, now - (s.lastSeen || now));
       if (elapsedMs > 1000) {
-        const gained = handleOfflineAccrual(s, elapsedMs); // PART 4
+        const gained = handleOfflineAccrual(s, elapsedMs); // PART 6
         if (gained > 0) setShowCollect(true);
         s.lastSeen = now;
       }
@@ -337,12 +911,71 @@ useEffect(() => {
     window.removeEventListener("pagehide", onHide);
     window.removeEventListener("beforeunload", onHide);
   };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
 }, [showIntro]);
 
-// רנדר חלק לשעונים (מתנה/כלב/GAIN) — פולס UI כל 200ms
 useEffect(() => {
-  const id = setInterval(() => { uiPulseAccumRef.current += 0.2; forceUiPulse(v => (v + 1) % 1000000); }, 200);
+  const canvas = canvasRef.current;
+  if (!canvas) return;
+
+  // התאמת קאנבס מידית לפי ה-wrapper
+  fitCanvasToWrapper(canvas);
+
+  // רענון על שינוי גודל/אוריינטציה/visualViewport (iOS)
+  const vv = window.visualViewport;
+  let t;
+  const onResize = () => {
+    clearTimeout(t);
+    t = setTimeout(() => fitCanvasToWrapper(canvas), 60);
+  };
+
+  window.addEventListener("resize", onResize);
+  window.addEventListener("orientationchange", onResize);
+  vv && vv.addEventListener("resize", onResize);
+
+  // אם יש לך לולאת ציור/engine שמחשב מחדש מטריקות — שמור
+  // ההוספה כאן רק מבטיחה שהקאנבס עצמו תמיד תפור לגובה העטיפה.
+
+  return () => {
+    clearTimeout(t);
+    window.removeEventListener("resize", onResize);
+    window.removeEventListener("orientationchange", onResize);
+    vv && vv.removeEventListener("resize", onResize);
+  };
+}, []);
+
+
+// רנדר/סנכרון מתנות — 500ms heartbeat
+useEffect(() => {
+  const id = setInterval(() => {
+    const s = stateRef.current; 
+    if (!s) return;
+    const now = Date.now();
+
+    if (!s.giftNextAt || Number.isNaN(s.giftNextAt)) {
+      const stepSec = currentGiftIntervalSec(s, now);
+      s.giftReady  = false;
+      s.giftNextAt = now + stepSec * 1000;
+      save();
+      return;
+    }
+
+    if (!s.giftReady && s.giftNextAt <= now) {
+      s.giftReady = true;
+      if (!s.giftFirstReadyAt) s.giftFirstReadyAt = now; // start idle timer here
+      setGiftReadyFlag(true);
+      save();
+    }
+  }, 500);
+
+  return () => clearInterval(id);
+}, []);
+
+// פולס UI כל 200ms
+useEffect(() => {
+  const id = setInterval(() => {
+    uiPulseAccumRef.current += 0.2;
+    forceUiPulse(v => (v + 1) % 1000000);
+   }, 200);
   return () => clearInterval(id);
 }, []);
 
@@ -357,25 +990,44 @@ function freshState(){
       beltShift: 0,
     })),
     miners:{}, nextId:1,
+
     gold:0, spawnCost:50, dpsMult:1, goldMult:1,
+
+    minerScale: 1.6,
+    minerWidth: 0.8,
+
     anim:{ t:0, coins:[], hint:1, fx:[] },
     onceSpawned:false,
     totalPurchased:0, spawnLevel:1,
     lastSeen:now, pendingOfflineGold:0,
-    // Gifts/diamonds
+    pendingOfflineMleo:0,
+
     cycleStartAt: now, lastGiftIntervalSec: 20,
     giftNextAt: now + 20000, giftReady:false,
     diamonds:0, nextDiamondPrize: rollDiamondPrize(),
-    // Auto-dog
-    autoDogLastAt: now, autoDogBank: 0,
-    // ad cooldown (נשמר גם כאן אם נטען)
+    giftFirstReadyAt: null,       // first time current gift became ready
+    isIdleOffline: false,         // force "offline-like" efficiency when idle
+
+    autoDogLastAt: now,
+autoDogNextAt: now + DOG_INTERVAL_SEC * 1000,
+    autoDogBank: 0,
+    autoDogPending: false,
+
     adCooldownUntil: 0,
+
+    pendingDiamondDogLevel: null,
   };
 }
+
 function loadSafe(){
   try { const raw = localStorage.getItem(LS_KEY); return raw ? JSON.parse(raw) : null; } catch { return null; }
 }
 function safeSave(){ try { save?.(); } catch {} }
+ 
+// === END PART 3 ===
+
+
+// === START PART 4 ===
 
 // ---------- קנבס/ציור ----------
 function setupCanvasAndLoop(cnv){
@@ -383,26 +1035,47 @@ function setupCanvasAndLoop(cnv){
   const DPR = window.devicePixelRatio || 1;
 
   const resize = () => {
-    const rect = cnv.parentElement?.getBoundingClientRect();
-    const targetW = Math.min(rect?.width || 360, 1024);
-    const targetH = rect ? Math.max(420, (rect.height || 600)) : 600;
+    const isFS = !!document.fullscreenElement;
+
+    let targetW, targetH;
+    if (isFS) {
+      targetW = Math.min(window.innerWidth || 360, 1024);
+      targetH = Math.max(420, (window.innerHeight || 600) - 1);
+      const wrap = cnv.parentElement;
+      if (wrap) wrap.style.height = `${window.innerHeight}px`;
+    } else {
+      const wrap = cnv.parentElement;
+      if (wrap) wrap.style.height = "";
+      const rect = wrap?.getBoundingClientRect();
+      const innerW = Math.max(320, Math.floor(wrap?.clientWidth  ?? rect?.width  ?? 360));
+      const innerH = Math.max(420, Math.floor(wrap?.clientHeight ?? rect?.height ?? 600));
+      targetW = Math.min(innerW, 1024);
+      targetH = innerH;
+    }
+
     cnv.style.width  = `${targetW}px`;
     cnv.style.height = `${targetH}px`;
-    cnv.width = Math.floor(targetW * DPR);
-    cnv.height= Math.floor(targetH * DPR);
+    cnv.width  = Math.floor(targetW * DPR);
+    cnv.height = Math.floor(targetH * DPR);
     ctx.setTransform(DPR,0,0,DPR,0,0);
     draw();
   };
+
+  const onFSResize = () => {
+    resize();
+    setTimeout(resize, 60);
+  };
+
   window.addEventListener("resize", resize);
+  document.addEventListener("fullscreenchange", onFSResize);
   resize();
 
-  // קלט — גרירה ומיקום (UX משופר)
   const onDown = (e) => {
-    if (isMobileLandscape || gamePaused || showIntro || showCollect) return;
+    const { isMobileLandscape: iml, paused } = flagsRef.current || {};
+    if (iml || paused) return;
     const p = pos(e);
     const hit = pickMiner(p.x,p.y);
     if (hit) {
-      // שמור offset יחסית למרכז הדמות
       dragRef.current = {
         active:true,
         id: hit.id,
@@ -421,7 +1094,7 @@ function setupCanvasAndLoop(cnv){
     const p = pos(e);
     dragRef.current.x = p.x - dragRef.current.ox;
     dragRef.current.y = p.y - dragRef.current.oy;
-    draw(); // רענון מיידי
+    draw();
   };
   const onUp = (e) => {
     if (!dragRef.current.active) return;
@@ -447,7 +1120,6 @@ function setupCanvasAndLoop(cnv){
           s.lanes[lane].slots[slot]={ id:nid };
           try { play?.(S_MERGE); } catch {}
         } else {
-          // יעד תפוס — החזרה למקום
           cur.slots[m.slot] = { id:m.id };
         }
       }
@@ -462,11 +1134,13 @@ function setupCanvasAndLoop(cnv){
   cnv.addEventListener("mousedown", onDown);
   cnv.addEventListener("mousemove", onMove);
   window.addEventListener("mouseup", onUp);
-  cnv.addEventListener("touchstart", (e)=>{ onDown(e.touches[0]); e.preventDefault(); }, {passive:false});
-  cnv.addEventListener("touchmove",  (e)=>{ onMove(e.touches[0]); e.preventDefault(); }, {passive:false});
-  cnv.addEventListener("touchend",   (e)=>{ onUp(e.changedTouches[0]); e.preventDefault(); }, {passive:false});
+  const onTouchStart = (e) => { onDown(e.touches[0]); e.preventDefault(); };
+  const onTouchMove  = (e) => { onMove(e.touches[0]); e.preventDefault(); };
+  const onTouchEnd   = (e) => { onUp(e.changedTouches[0]); e.preventDefault(); };
+  cnv.addEventListener("touchstart", onTouchStart, { passive:false });
+  cnv.addEventListener("touchmove",  onTouchMove,  { passive:false });
+  cnv.addEventListener("touchend",   onTouchEnd,   { passive:false });
 
-  // לולאה
   let last = performance.now();
   const loop = (t) => {
     const dt = Math.min(0.05, (t-last)/1000);
@@ -479,17 +1153,18 @@ function setupCanvasAndLoop(cnv){
   return () => {
     cancelAnimationFrame(rafRef.current);
     window.removeEventListener("resize", resize);
+    document.removeEventListener("fullscreenchange", onFSResize);
     cnv.removeEventListener("mousedown", onDown);
     cnv.removeEventListener("mousemove", onMove);
     window.removeEventListener("mouseup", onUp);
-    cnv.removeEventListener("touchstart", onDown);
-    cnv.removeEventListener("touchmove", onMove);
-    cnv.removeEventListener("touchend", onUp);
+    cnv.removeEventListener("touchstart", onTouchStart);
+    cnv.removeEventListener("touchmove",  onTouchMove);
+    cnv.removeEventListener("touchend",   onTouchEnd);
   };
 }
 
 // ----- גיאומטריה -----
-const PILL_H = 36; // גובה כפתור ADD
+const PILL_H = UI_BTN_H_PX;
 function boardRect(){
   const c = canvasRef.current;
   return { x:PADDING, y:PADDING, w:(c?.clientWidth||0)-PADDING*2, h:(c?.clientHeight||0)-PADDING*2 };
@@ -497,12 +1172,14 @@ function boardRect(){
 function laneRect(lane){
   const b = boardRect();
   const h = b.h * 0.18;
-  const centers = [0.375,0.525,0.675,0.815];
+  const centers = [0.420,0.570,0.720,0.865];
   const centerY = b.y + b.h * centers[lane];
   const y = Math.max(b.y, Math.min(centerY - h*0.5, b.y + b.h - h));
   return { x:b.x, y, w:b.w, h };
 }
-function rockWidth(L){ return Math.min(L.w*0.16, Math.max(50, L.h*0.64)); }
+function rockWidth(L){
+  return Math.min(L.w * 0.30, Math.max(80, L.h * 1.10));
+}
 function slotRect(lane,slot){
   const L = laneRect(lane);
   const rw = rockWidth(L);
@@ -512,14 +1189,38 @@ function slotRect(lane,slot){
 function rockRect(lane){
   const L = laneRect(lane);
   const rw = rockWidth(L);
-  const y = L.y + L.h * 0.06;
-  const h = L.h * 0.88;
+  const y = L.y + L.h * 0.05;
+  const h = L.h * 0.90;
   return { x:L.x + L.w - rw - 4, y, w:rw, h };
 }
 function pos(e){
   const r = canvasRef.current?.getBoundingClientRect();
   return { x: e.clientX - (r?.left||0), y: e.clientY - (r?.top||0) };
 }
+
+// Fit canvas to its wrapper with DPR (no lanes changes)
+function fitCanvasToWrapper(canvas) {
+  const wrap = canvas?.parentElement;
+  if (!canvas || !wrap) return;
+  const rect = wrap.getBoundingClientRect();
+
+  // DPI scaling for sharp rendering (cap to 2 for performance)
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+  // Set internal buffer size
+  canvas.width  = Math.round(rect.width  * dpr);
+  canvas.height = Math.round(rect.height * dpr);
+
+  // CSS size to match wrapper
+  canvas.style.width  = `${Math.round(rect.width)}px`;
+  canvas.style.height = `${Math.round(rect.height)}px`;
+
+  // Scale context so all existing drawing uses CSS pixels
+  const ctx = canvas.getContext("2d");
+  if (ctx) ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+
 function pointInRect(x,y,r){ return x>=r.x && x<=r.x+r.w && y>=r.y && y<=r.y+r.h; }
 function pillRect(lane,slot){
   const r = slotRect(lane,slot);
@@ -565,6 +1266,11 @@ function pickMiner(x,y){
   return null;
 }
 
+// === END PART 4 ===
+
+
+// === START PART 5 ===
+
 // ----- ציור -----
 function drawBg(ctx,b){
   const img = getImg(IMG_BG);
@@ -580,40 +1286,114 @@ function drawBg(ctx,b){
     ctx.fillStyle=g; ctx.fillRect(b.x,b.y,b.w,b.h);
   }
 }
-function drawRock(ctx,rect,rock){
-  const pct = Math.max(0, rock.hp/rock.maxHp);
-  const scale = 0.35 + 0.65*pct;
-  const img = getImg(IMG_ROCK);
-  const pad=6, fullW=rect.w-pad*2, fullH=rect.h-pad*2;
-  const rw=fullW*scale, rh=fullH*scale;
-  const cx=rect.x+rect.w/2, cy=rect.y+rect.h/2;
-  const dx=cx-rw/2, dy=cy-rh/2;
-  if (img.complete && img.naturalWidth>0) ctx.drawImage(img,dx,dy,rw,rh);
-  else { ctx.fillStyle="#6b7280"; ctx.fillRect(dx,dy,rw,rh); }
-  // HP bar
-  const bx=rect.x+pad, by=rect.y+4, barW=fullW, barH=6;
-  ctx.fillStyle="#0ea5e9"; ctx.fillRect(bx,by,barW*pct,barH);
-  ctx.strokeStyle="#082f49"; ctx.lineWidth=1; ctx.strokeRect(bx,by,barW,barH);
-  ctx.fillStyle="#e5e7eb"; ctx.font="bold 11px system-ui";
-  ctx.fillText(`Rock ${rock.idx+1}`, bx, by+16);
-}
-function drawMiner(ctx,lane,slot,m){
-  const r=slotRect(lane,slot);
-  const cx=r.x+r.w*0.52, cy=r.y+r.h*0.56;
-  const w=Math.min(r.w,r.h)*0.84;
-  const img=getImg(IMG_MINER);
-  if (img.complete && img.naturalWidth>0) {
-    const frame=Math.floor(((stateRef.current?.anim?.t)||0)*8)%4;
-    const sw=img.width/4, sh=img.height;
-    ctx.drawImage(img, frame*sw,0,sw,sh, cx-w/2,cy-w/2, w,w);
+
+function drawRock(ctx, rect, rock){
+  // בלי צללים
+  ctx.shadowColor = "transparent";
+  ctx.shadowBlur  = 0;
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = 0;
+
+  // מצב הסלע
+  const pct   = Math.max(0, rock.hp / rock.maxHp);
+  const scale = 0.35 + 0.65 * pct;
+
+  // מסגרות ומידות
+  const img   = getImg(IMG_ROCK);
+  const pad   = 6;
+  const fullW = rect.w - pad*2;
+  const fullH = rect.h - pad*2;
+
+  // גודל/מיקום הסלע (אותו חישוב כמו קודם)
+  const rw = fullW * scale;
+  const rh = fullH * scale;
+  const cx = rect.x + rect.w / 2;
+  const cy = rect.y + rect.h / 2;
+  const dx = cx - rw / 2;
+  const dy = cy - rh / 2;
+
+  // ציור הסלע
+  if (img.complete && img.naturalWidth > 0) {
+    ctx.drawImage(img, dx, dy, rw, rh);
   } else {
-    ctx.fillStyle="#22c55e"; ctx.beginPath(); ctx.arc(cx,cy,w*0.35,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle = "#6b7280";
+    ctx.fillRect(dx, dy, rw, rh);
   }
-  // level
-  ctx.fillStyle="rgba(0,0,0,.6)"; ctx.fillRect(cx-w*0.5, cy-w*0.62, 30, 16);
-  ctx.fillStyle="#fff"; ctx.font="bold 10px system-ui"; ctx.fillText(m.level, cx-w*0.5+9, cy-w*0.62+12);
+
+  // === מיקומים קבועים בתוך הסלע ===
+  const INNER_PAD = 6;              // רווח פנימי מהשוליים
+  const BAR_H = 18;                           // ↑ בר גבוה יותר (במקום 10)
+  const BAR_W = Math.min(fullW * 0.75, rw - 12);
+  const BAR_X = dx + (rw - BAR_W) / 2;
+ const BAR_Y = dy + rh - (BAR_H / 2);
+
+ 
+
+
+
+  // רקע הבר
+  ctx.fillStyle = "rgba(0,0,0,.35)";
+  ctx.fillRect(BAR_X, BAR_Y, BAR_W, BAR_H);
+
+  // מילוי הבר
+  ctx.fillStyle = "#0ea5e9";
+  ctx.fillRect(BAR_X, BAR_Y, Math.max(0, BAR_W * pct), BAR_H);
+
+  // מסגרת
+  ctx.strokeStyle = "#082f49";
+  ctx.lineWidth   = 1;
+  ctx.strokeRect(BAR_X, BAR_Y, BAR_W, BAR_H);
+
+  // === טקסט בתוך הבר ===
+  const TXT = `ROCK ${rock.idx + 1}`;
+  ctx.font         = "bold 12px system-ui";
+  ctx.textAlign    = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle    = "#ffffff"; // לבן
+  ctx.fillText(TXT, BAR_X + BAR_W / 2, BAR_Y + BAR_H / 2);
 }
+
+
+
+function drawMiner(ctx,lane,slot,m){
+  const r  = slotRect(lane,slot);
+  const cx = r.x + r.w*0.52;
+  const cy = r.y + r.h*0.45;
+
+  const scaleH = (stateRef.current?.minerScale || 1);
+  const base   = Math.min(r.w, r.h) * 0.84 * scaleH;
+  const wH     = base;
+  const wW     = base * (stateRef.current?.minerWidth || 1.15);
+
+  ctx.shadowColor = "transparent";
+  ctx.shadowBlur  = 0;
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = 0;
+
+  const img = getImg(IMG_MINER);
+  if (img.complete && img.naturalWidth>0) {
+    const frame = Math.floor(((stateRef.current?.anim?.t)||0)*8)%4;
+    const sw = img.width/4, sh = img.height;
+    ctx.drawImage(img, frame*sw, 0, sw, sh, cx - wW/2, cy - wH/2, wW, wH);
+  } else {
+    ctx.fillStyle="#22c55e";
+    ctx.beginPath(); ctx.ellipse(cx, cy, (wW*0.35), (wH*0.35), 0, 0, Math.PI*2); ctx.fill();
+  }
+
+  const fontPx = Math.max(12, Math.floor(base*0.22));
+  ctx.fillStyle    = "#ffffff";
+  ctx.font         = `bold ${fontPx}px system-ui`;
+  ctx.textAlign    = "center";
+  ctx.textBaseline = "alphabetic";
+  ctx.fillText(String(m.level), cx, cy - base*0.20);
+}
+
 function drawPill(ctx,x,y,w,h,label,enabled=true){
+  ctx.shadowColor = "transparent";
+  ctx.shadowBlur  = 0;
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = 0;
+
   const g=ctx.createLinearGradient(x,y,x,y+h);
   if (enabled){ g.addColorStop(0,"#fef08a"); g.addColorStop(1,"#facc15"); }
   else{ g.addColorStop(0,"#475569"); g.addColorStop(1,"#334155"); }
@@ -637,20 +1417,16 @@ function roundRect(ctx,x,y,w,h,r){
 function draw(){
   const c = canvasRef.current; if (!c) return;
   const ctx = c.getContext("2d"); if (!ctx) return;
-  const s = stateRef.current; if (!s) return;
+  const s = stateRef.current;   if (!s) return;
   const b = boardRect();
+
+  ctx.shadowColor = "transparent";
+  ctx.shadowBlur  = 0;
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = 0;
 
   drawBg(ctx,b);
 
-  // יעד פוטנציאלי תחת הסמן (אם גוררים)
-  let hoverDrop = null;
-  if (dragRef.current.active) {
-    const px = (dragRef.current.x ?? 0) + (dragRef.current.ox ?? 0);
-    const py = (dragRef.current.y ?? 0) + (dragRef.current.oy ?? 0);
-    hoverDrop = pickSlot(px, py);
-  }
-
-  // ציור פילי ADD, סלעים וכלבים — מסתירים את הכלב הנגרר
   for (let l=0; l<LANES; l++){
     for (let k=0; k<SLOTS_PER_LANE; k++){
       const cell = s.lanes[l].slots[k];
@@ -663,24 +1439,12 @@ function draw(){
     drawRock(ctx, rockRect(l), s.lanes[l].rock);
     for (let k=0; k<SLOTS_PER_LANE; k++){
       const cell = s.lanes[l].slots[k]; if (!cell) continue;
-      const m = s.miners[cell.id]; if (!m) continue;
-      if (dragRef.current.active && dragRef.current.id === m.id) continue; // הסתרת המקור בזמן גרירה
+      const m = s.miners[cell.id];      if (!m) continue;
+      if (dragRef.current.active && dragRef.current.id === m.id) continue;
       drawMiner(ctx,l,k,m);
     }
   }
 
-  // היילייט יעד
-  if (dragRef.current.active && hoverDrop) {
-    const r = slotRect(hoverDrop.lane, hoverDrop.slot);
-    ctx.save();
-    ctx.strokeStyle = "rgba(250,204,21,.9)";
-    ctx.lineWidth = 3;
-    roundRect(ctx, r.x+4, r.y+4, r.w-8, r.h-8, 12);
-    ctx.stroke();
-    ctx.restore();
-  }
-
-  // GHOST של הכלב הנגרר + צל
   if (dragRef.current.active) {
     const id = dragRef.current.id;
     const m  = s.miners[id];
@@ -688,29 +1452,26 @@ function draw(){
       const gx = (dragRef.current.x ?? 0) + (dragRef.current.ox ?? 0);
       const gy = (dragRef.current.y ?? 0) + (dragRef.current.oy ?? 0);
       const r0 = slotRect(m.lane, m.slot);
-      const w  = Math.min(r0.w, r0.h) * 0.84;
 
-      // צל
-      ctx.save();
-      ctx.globalAlpha = 0.35;
-      ctx.fillStyle = "#000";
-      ctx.beginPath();
-      ctx.ellipse(gx, gy + w*0.40, w*0.55, w*0.18, 0, 0, Math.PI*2);
-      ctx.fill();
-      ctx.restore();
+      const baseW = Math.min(r0.w, r0.h) * 0.84;
+      const scaleH = (stateRef.current?.minerScale || 1);
+      const wH = baseW * scaleH;
+      const wW = wH * (stateRef.current?.minerWidth || 1.15);
 
-      // הדמות
+      const img=getImg(IMG_MINER);
       ctx.save();
       ctx.globalAlpha = 0.9;
-      const img=getImg(IMG_MINER);
+      ctx.shadowColor = "transparent";
+      ctx.shadowBlur  = 0;
+      ctx.shadowOffsetX = 0;
+      ctx.shadowOffsetY = 0;
       if (img.complete && img.naturalWidth>0) {
         const frame=Math.floor(((stateRef.current?.anim?.t)||0)*8)%4;
         const sw=img.width/4, sh=img.height;
-        const ww = w*1.05;
-        ctx.drawImage(img, frame*sw,0,sw,sh, gx-ww/2, gy-ww/2, ww, ww);
+        ctx.drawImage(img, frame*sw,0,sw,sh, gx-wW/2, gy-wH/2, wW, wH);
       } else {
         ctx.fillStyle="#22c55e";
-        ctx.beginPath(); ctx.arc(gx,gy,(w*0.35)*1.05,0,Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.ellipse(gx,gy,(wW*0.35),(wH*0.35),0,0,Math.PI*2); ctx.fill();
       }
       ctx.restore();
     }
@@ -721,30 +1482,47 @@ function draw(){
 function tick(dt){
   const s = stateRef.current; if (!s) return;
   s.anim.t += dt;
-  s.paused = gamePaused || showIntro || showCollect;
+  s.paused = !!(flagsRef.current && flagsRef.current.paused);
   const now = Date.now();
   if (s.paused){ s.lastSeen = now; return; }
+
+// If a gift has been ready for over 5 minutes without being claimed, force idle-offline
+  if (s.giftReady && s.giftFirstReadyAt && (now - s.giftFirstReadyAt) >= IDLE_OFFLINE_MS) {
+    s.isIdleOffline = true;
+  }
 
   for (let l=0; l<LANES; l++){
     let dps = 0;
     for (let k=0; k<SLOTS_PER_LANE; k++){
       const cell = s.lanes[l].slots[k]; if (!cell) continue;
       const m = s.miners[cell.id]; if (!m) continue;
-      dps += minerDps(m.level, s.dpsMult||1);
+      const onlineEff = s.isIdleOffline ? OFFLINE_DPS_FACTOR : 1;
+      dps += minerDps(m.level, s.dpsMult||1) * onlineEff;
     }
     const rock = s.lanes[l].rock;
     rock.hp -= dps * dt;
-    if (rock.hp <= 0){
-      const gain = Math.floor(rock.maxHp * GOLD_FACTOR * (s.goldMult||1));
-      s.gold += gain; setUi(u => ({ ...u, gold:s.gold }));
-      addPlayerScorePoints(s, gain);
+    if (rock.hp <= 0) {
+      const nowT = Date.now();
+      if (nowT - (rockSfxCooldownRef.current || 0) > 200) {
+        rockSfxCooldownRef.current = nowT;
+        try { play?.(S_ROCK); } catch {}
+      }
+      const coinsGain = Math.floor(rock.maxHp * GOLD_FACTOR * (s.goldMult || 1));
+      const mleoGainPreview = previewMleoFromCoins(coinsGain);
+
+      s.gold += coinsGain; setUi(u => ({ ...u, gold: s.gold }));
+      addPlayerScorePoints(s, coinsGain);
+
+const mleoTxt = formatMleoShort(mleoGainPreview || 0);
+setCenterPopup({ text: `⛏️ +${formatShort(coinsGain)} coins • +${mleoTxt} MLEO`, id: Math.random() });
+
+
       s.lanes[l].rockCount += 1;
       s.lanes[l].rock = newRock(l, s.lanes[l].rockCount);
       safeSave();
     }
   }
 
-  // gifts timer → מכין את כפתור 🎁
   if (!s.giftReady) {
     if ((s.giftNextAt || 0) <= Date.now()) {
       s.giftReady = true;
@@ -752,38 +1530,36 @@ function tick(dt){
     }
   }
 
-  // bank-dog: צבירה אונליין והפצה אם יש מקום
-  if (s.autoDogLastAt == null) s.autoDogLastAt = Date.now();
-  const elapsedSinceDog = Date.now() - (s.autoDogLastAt || Date.now());
-  if (elapsedSinceDog >= (typeof DOG_INTERVAL_SEC !== "undefined" ? DOG_INTERVAL_SEC : 900) * 1000) {
-    accrueBankDogsByElapsed(s, elapsedSinceDog); // PART 4
+  if (s.pendingDiamondDogLevel && countMiners(s) < MAX_MINERS) {
+    const placed = spawnMiner(s, s.pendingDiamondDogLevel);
+    if (placed) {
+      const placedLvl = s.pendingDiamondDogLevel;
+      s.pendingDiamondDogLevel = null;
+      s.giftReady  = false;
+      s.giftNextAt = Date.now() + currentGiftIntervalSec(s) * 1000;
+      setGiftToastWithTTL(`💎 Dog (LV ${placedLvl}) placed`);
+      save?.();
+    }
   }
-  tryDistributeBankDog(s); // PART 4
+
+  accrueBankDogsUpToNow(s);
+  tryDistributeBankDog(s);
 
   finalizeDailyRewardOncePerTick();
   s.lastSeen = now;
 }
-// === END PART 3 ===
+
+// === END PART 5 ===
 
 
+// === START PART 6 ===
 
-// === START PART 4 ===
 // Helpers + save/load + purchases + reset + misc used by JSX
 
-// ── Basic math helpers ──
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+function countMiners(s) { return s?.miners ? Object.keys(s.miners).length : 0; }
+function minerDps(level, mul = 1) { return BASE_DPS * Math.pow(LEVEL_DPS_MUL, level - 1) * mul; }
 
-// ── Count miners safely ──
-function countMiners(s) {
-  return s?.miners ? Object.keys(s.miners).length : 0;
-}
-
-// ── DPS per miner (uses your balance constants) ──
-function minerDps(level, mul = 1) {
-  return BASE_DPS * Math.pow(LEVEL_DPS_MUL, level - 1) * mul;
-}
-
-// ── Lane DPS sum (used by expectedRockCoinReward/offline etc.) ──
 function laneDpsSum(s, laneIdx) {
   if (!s) return 0;
   let dps = 0;
@@ -797,110 +1573,58 @@ function laneDpsSum(s, laneIdx) {
   return dps;
 }
 
-// ── Rocks ──
 function newRock(lane, idx) {
   const hp = Math.floor(ROCK_BASE_HP * Math.pow(ROCK_HP_MUL, idx));
   return { lane, idx, maxHp: hp, hp };
 }
 
-// ── Fresh state used by resetGame/first boot ──
-function makeFreshState() {
-  const now = Date.now();
-  return {
-    lanes: Array.from({ length: LANES }, (_, lane) => ({
-      slots: Array(SLOTS_PER_LANE).fill(null),
-      rock: newRock(lane, 0),
-      rockCount: 0,
-      beltShift: 0,
-    })),
-    miners: {},
-    nextId: 1,
-
-    gold: 0,
-    spawnCost: 50,
-    dpsMult: 1,
-    goldMult: 1,
-
-    anim: { t: 0, coins: [], hint: 1, fx: [] },
-    onceSpawned: false,
-
-    // purchasing & levels
-    totalPurchased: 0,
-    spawnLevel: 1,
-
-    // offline
-    lastSeen: now,
-    pendingOfflineGold: 0,
-
-    // gifts timer
-    cycleStartAt: now,
-    lastGiftIntervalSec: 20,
-    giftNextAt: now + 20 * 1000,
-    giftReady: false,
-
-    // diamonds
-    diamonds: 0,
-    nextDiamondPrize: rollDiamondPrize(),
-
-    // auto-dog
-    autoDogLastAt: now,
-    autoDogBank: 0,
-
-    // ad cooldown — מקור אמת נשמר בשמירה
-    adCooldownUntil: 0,
-  };
-}
+function makeFreshState() { return freshState(); }
 
 // ── Save/Load ──
 function save() {
   const s = stateRef.current; if (!s) return;
   try {
     localStorage.setItem(LS_KEY, JSON.stringify({
-      // core
       lanes: s.lanes, miners: s.miners, nextId: s.nextId,
       gold: s.gold, spawnCost: s.spawnCost, dpsMult: s.dpsMult, goldMult: s.goldMult,
       onceSpawned: s.onceSpawned,
-      // offline
-      lastSeen: s.lastSeen, pendingOfflineGold: s.pendingOfflineGold || 0,
-      // buy-level
+
+      minerScale: s.minerScale || 1.6,
+      minerWidth: s.minerWidth || 0.8,
+
+      lastSeen: s.lastSeen,
+      pendingOfflineGold: s.pendingOfflineGold || 0,
+      pendingOfflineMleo: s.pendingOfflineMleo || 0,
       totalPurchased: s.totalPurchased, spawnLevel: s.spawnLevel,
-      // gifts
+
       cycleStartAt: s.cycleStartAt,
       lastGiftIntervalSec: s.lastGiftIntervalSec,
       giftNextAt: s.giftNextAt, giftReady: s.giftReady,
-      // diamonds
+
       diamonds: s.diamonds || 0,
       nextDiamondPrize: s.nextDiamondPrize,
-      // auto-dog
-      autoDogLastAt: s.autoDogLastAt, autoDogBank: s.autoDogBank,
-      // pricing anchor
+
+     // auto-dog
+autoDogLastAt: s.autoDogLastAt,
+autoDogNextAt: s.autoDogNextAt,
+autoDogBank: s.autoDogBank,
+
+      autoDogPending: !!s.autoDogPending,
+
       costBase: s.costBase,
-      // ad cooldown (persist from state)
       adCooldownUntil: s.adCooldownUntil || 0,
+
+      pendingDiamondDogLevel: s.pendingDiamondDogLevel || null,
     }));
   } catch {}
 }
-function load() {
-  try { const raw = localStorage.getItem(LS_KEY); return raw ? JSON.parse(raw) : null; } catch { return null; }
-}
 
-// ── Costs ──
-function _baseCost(s) {
-  if (!s) return 160;
-  return Math.max(80, s.costBase || 120);
-}
-function _dpsCost(s) {
-  const base  = _baseCost(s);
-  const steps = Math.max(0, Math.round(((s?.dpsMult || 1) - 1) * 10)); // כל +10% = צעד
-  return Math.ceil(base * 2.0 * Math.pow(1.18, steps));
-}
-function _goldCost(s) {
-  const base  = _baseCost(s);
-  const steps = Math.max(0, Math.round(((s?.goldMult || 1) - 1) * 10));
-  return Math.ceil(base * 2.2 * Math.pow(1.18, steps));
-}
+function load() { try { const raw = localStorage.getItem(LS_KEY); return raw ? JSON.parse(raw) : null; } catch { return null; } }
 
-// ── Expected reward for the *next* rock break ──
+function _baseCost(s) { if (!s) return 160; return Math.max(80, s.costBase || 120); }
+function _dpsCost(s)  { const base=_baseCost(s); const steps=Math.max(0, Math.round(((s?.dpsMult||1)-1)*10)); return Math.ceil(base*2.0*Math.pow(1.18,steps)); }
+function _goldCost(s) { const base=_baseCost(s); const steps=Math.max(0, Math.round(((s?.goldMult||1)-1)*10)); return Math.ceil(base*2.2*Math.pow(1.18,steps)); }
+
 function expectedRockCoinReward(s) {
   if (!s) return 0;
   let bestLane = 0, bestDps = 0;
@@ -920,8 +1644,6 @@ function expectedRockCoinReward(s) {
   return Math.floor(rock.maxHp * GOLD_FACTOR * (s.goldMult || 1));
 }
 
-// ── NEW: Expected reward for GIFTS/ADS — לפי כל הסלעים במסך ──
-// נוסחה: הגדול ביותר + 50% מסכום שאר המסילות.
 function expectedGiftCoinReward(s) {
   if (!s) return 0;
   const mult = (s.goldMult || 1);
@@ -930,23 +1652,20 @@ function expectedGiftCoinReward(s) {
     const rk = s.lanes[l].rock;
     vals.push(Math.floor(rk.maxHp * GOLD_FACTOR * mult));
   }
-  if (vals.length === 0) return 0;
+  if (!vals.length) return 0;
   const max = Math.max(...vals);
   const sum = vals.reduce((a,b)=>a+b,0);
   const others = sum - max;
-  return Math.floor(max + others * 0.5); // אפשר לכוונן משקל בקלות
+  return Math.floor(max + others * 0.5);
 }
 
-// ── UI toast helper ──
 function setGiftToastWithTTL(text, ttl = 3000) {
   const id = Math.random().toString(36).slice(2);
   setGiftToast?.({ text, id });
-  setTimeout(() => {
-    setGiftToast?.(cur => (cur && cur.id === id ? null : cur));
-  }, ttl);
+  setTimeout(() => { setGiftToast?.(cur => (cur && cur.id === id ? null : cur)); }, ttl);
 }
 
-// ── Spawn logic ──
+// === Spawn helpers ===
 function spawnMiner(s, level = 1) {
   if (!s) return false;
   if (countMiners(s) >= MAX_MINERS) return false;
@@ -972,6 +1691,7 @@ function spawnMinerAt(s, lane, slot, level = 1) {
   s.lanes[lane].slots[slot] = { id };
   return true;
 }
+
 function afterPurchaseBump(s) {
   s.totalPurchased = (s.totalPurchased || 0) + 1;
   s.spawnLevel = 1 + Math.floor((s.totalPurchased) / 30);
@@ -1014,24 +1734,216 @@ function upgradeDps() {
 function upgradeGold() {
   const s = stateRef.current; if (!s) return;
   const cost = _goldCost(s); if (s.gold < cost) return;
-  s.gold -= cost; s.goldMult = +((s.goldMult || 1) * 1.1).toFixed(3);
+  s.gold -= cost; s.goldMult = +((s.goldMult || 1) * 1.1).toFixed(2);
   setUi(u => ({ ...u, gold: s.gold })); save();
 }
 
-// ── Offline collect ──
 function onOfflineCollect() {
   const s = stateRef.current; if (!s) return;
-  const add = s.pendingOfflineGold || 0;
-  if (add > 0) {
-    s.gold += add;
+  const addCoins = s.pendingOfflineGold || 0;
+  const addMleo  = Number(s.pendingOfflineMleo || 0);
+
+  if (addCoins > 0) {
+    s.gold += addCoins;
     s.pendingOfflineGold = 0;
     setUi(u => ({ ...u, gold: s.gold }));
-    save();
+  }
+  s.pendingOfflineMleo = 0;
+
+  save();
+
+  if (addCoins > 0 || addMleo > 0) {
+  setCenterPopup({
+  text: `⛏️ +${formatShort(addCoins)} coins • +${formatMleoShort(addMleo)} MLEO`,
+
+  id: Math.random()
+});
+
   }
   setShowCollect(false);
 }
 
-// ── Fullscreen helpers ──
+// ===== אוטו־דוג/אופליין/מתנות =====
+
+function chooseAutoDogLevel(s) {
+  const sl = Math.max(1, s.spawnLevel || 1);
+  const target2 = Math.max(1, sl - 2);
+  const existsLv2 = Object.values(s.miners || {}).some(m => m.level === target2);
+  return existsLv2 ? target2 : sl;
+}
+
+function chooseGiftDogLevelForRegularGift(s) {
+  // Gift dog (REGULAR) = buy level by default; if no merge is possible at buy level → lowest existing level on board
+  return chooseGiftDogPlacementLevel(s);
+}
+
+
+function accrueBankDogsUpToNow(s) {
+  if (!s) return;
+  const period = DOG_INTERVAL_SEC * 1000;
+  const now = Date.now();
+
+  if (!s.autoDogNextAt || Number.isNaN(s.autoDogNextAt)) {
+    s.autoDogNextAt = now + period;
+  }
+
+  // cap bank by AVAILABLE FREE SLOTS (pause when full)
+  const freeSlots = Math.max(0, MAX_MINERS - countMiners(s));
+  const bankCapNow = Math.min(DOG_BANK_CAP, freeSlots);
+
+  if (now >= s.autoDogNextAt) {
+    const intervals = Math.floor((now - s.autoDogNextAt) / period) + 1;
+    const cur = (s.autoDogBank || 0);
+    s.autoDogBank = Math.min(bankCapNow, cur + intervals);
+    s.autoDogNextAt += intervals * period;
+    save?.();
+  }
+}
+
+// --- helpers for gift-dog placement (buy-level vs lowest-existing) ---
+function lowestExistingLevelOnBoard(s) {
+  const levels = Object.values(s.miners || {})
+    .filter(Boolean)
+    .map(m => m.level)
+    .filter(v => typeof v === "number" && v >= 1);
+  if (!levels.length) return null;
+  levels.sort((a,b)=>a-b);
+  return levels[0]; // lowest existing level
+}
+
+// "can merge at buy level" = יש לפחות כלב אחד ברמת הקנייה על הלוח (אפשרות לזוג/מיזוג)
+function canMergeAtBuyLevel(s) {
+  const bl = Math.max(1, s.spawnLevel || 1);
+  return Object.values(s.miners || {}).some(m => m && m.level === bl);
+}
+
+// בחירת דרגה למתנה רגילה: ברירת־מחדל דרגת קנייה; אם אין שום אפשרות מיזוג — הדרגה הנמוכה ביותר שקיימת על הלוח
+function chooseGiftDogPlacementLevel(s) {
+  const buyLevel = Math.max(1, s.spawnLevel || 1);
+  if (canMergeAtBuyLevel(s)) return buyLevel;
+  const low = lowestExistingLevelOnBoard(s);
+  return low || buyLevel; // אם הלוח ריק—נשארים עם דרגת הקנייה
+}
+
+
+function tryDistributeBankDog(s) {
+  if (!s) return;
+  if (!hasFreeSlot(s)) return;
+  if ((s.autoDogBank || 0) <= 0) return;
+
+  const lvl = chooseAutoDogLevel(s);
+  const ok = spawnMiner(s, lvl);
+  if (ok) {
+    s.autoDogBank = Math.max(0, (s.autoDogBank || 0) - 1);
+    setCenterPopup?.({ text: `🦊 Auto Dog (LV ${lvl})`, id: Math.random() });
+    save?.();
+  }
+}
+
+
+function handleOfflineAccrual(s, elapsedMs) {
+  if (!s) return 0;
+
+  // Auto-dog: accrue by nextAt → bank (but PAUSE when no free slots), then try to deploy
+{
+  const period = DOG_INTERVAL_SEC * 1000;
+  const now = Date.now();
+
+  if (!s.autoDogNextAt || Number.isNaN(s.autoDogNextAt)) {
+    s.autoDogNextAt = now + period;
+  }
+
+  // capacity according to CURRENT free slots
+  const freeSlots0 = Math.max(0, MAX_MINERS - countMiners(s));
+  let bankCapNow = Math.min(DOG_BANK_CAP, freeSlots0);
+
+  if (now >= s.autoDogNextAt) {
+    const intervals = Math.floor((now - s.autoDogNextAt) / period) + 1;
+    const cur = (s.autoDogBank || 0);
+    s.autoDogBank = Math.min(bankCapNow, cur + intervals);
+    s.autoDogNextAt += intervals * period;
+  }
+
+  // Try to spend bank immediately if slots exist
+  while ((s.autoDogBank || 0) > 0 && hasFreeSlot(s)) {
+    const lvl = chooseAutoDogLevel(s); // אוטו-דוג: שומר על הבחירה הרגילה שלך
+    const ok = spawnMiner(s, lvl);
+    if (!ok) break;
+    s.autoDogBank -= 1;
+
+    // Recompute capacity after placement
+    const freeNow = Math.max(0, MAX_MINERS - countMiners(s));
+    bankCapNow = Math.min(DOG_BANK_CAP, freeNow);
+    if (bankCapNow <= 0) break; // pause accrual when full
+  }
+}
+
+
+
+  const CAP_MS = 12 * 60 * 60 * 1000;
+  const simMs = Math.min(elapsedMs, CAP_MS);
+  let totalCoins = 0;
+
+  for (let lane = 0; lane < LANES; lane++) {
+    let dps = laneDpsSum(s, lane) * OFFLINE_DPS_FACTOR;
+    if (dps <= 0) continue;
+
+    let idx = s.lanes[lane].rock.idx;
+    let hp  = s.lanes[lane].rock.hp;
+    let maxHp = s.lanes[lane].rock.maxHp;
+    let timeLeft = simMs / 1000;
+
+    while (timeLeft > 0 && dps > 0) {
+      const timeToBreak = hp / dps;
+      if (timeToBreak > timeLeft) {
+        hp -= dps * timeLeft;
+        timeLeft = 0;
+      } else {
+        totalCoins += Math.floor(maxHp * GOLD_FACTOR * (s.goldMult || 1));
+        timeLeft -= timeToBreak;
+        idx += 1;
+        const rk = newRock(lane, idx);
+        hp = rk.hp; maxHp = rk.maxHp;
+      }
+    }
+
+    s.lanes[lane].rock = { lane, idx, maxHp, hp: Math.max(1, Math.floor(hp)) };
+    s.lanes[lane].rockCount = idx;
+  }
+
+  if (totalCoins > 0) {
+    s.pendingOfflineGold = (s.pendingOfflineGold || 0) + totalCoins;
+    try {
+      const before = loadMiningState();
+      const balBefore = Number(before?.balance || 0);
+
+      addPlayerScorePoints(s, totalCoins);
+      finalizeDailyRewardOncePerTick();
+
+      const after = loadMiningState();
+      const balAfter = Number(after?.balance || 0);
+      const delta = Math.max(0, +(balAfter - balBefore).toFixed(2));
+
+      s.pendingOfflineMleo = +((s.pendingOfflineMleo || 0) + delta).toFixed(2);
+    } catch {}
+  }
+
+  return totalCoins;
+}
+
+function hasFreeSlot(s) {
+  return countMiners(s) < MAX_MINERS;
+}
+
+function rollGiftType() {
+  const r = Math.random() * 100;
+  if (r < 70) return "coins20";
+  if (r < 78) return "dps";
+  if (r < 86) return "gold";
+  if (r < 92) return "diamond";
+  return "coins40";
+}
+
 async function enterFullscreenAndLockMobile() { try {
   const w = window.innerWidth, desktop = w >= 1024;
   if (desktop) return;
@@ -1041,10 +1953,18 @@ async function enterFullscreenAndLockMobile() { try {
 } catch {} }
 async function exitFullscreenIfAny() { try { if (document.fullscreenElement) await document.exitFullscreen(); } catch {} }
 
-// ── RESET ──
 async function resetGame() {
   try { play?.(S_CLICK); } catch {}
-  try { localStorage.removeItem(LS_KEY); } catch {}
+
+  try {
+    localStorage.removeItem(LS_KEY);
+    localStorage.removeItem(MINING_LS_KEY);
+  } catch {}
+
+  setMining({
+    balance: 0, minedToday: 0, lastDay: getTodayKey(),
+    scoreToday: 0, vault: 0, claimedTotal: 0, history: []
+  });
 
   const fresh = makeFreshState();
   fresh.costBase = Math.max(80, expectedRockCoinReward(fresh));
@@ -1052,10 +1972,8 @@ async function resetGame() {
 
   setUi(u => ({
     ...u,
-    gold: fresh.gold,
-    spawnCost: fresh.spawnCost,
-    dpsMult: fresh.dpsMult,
-    goldMult: fresh.goldMult,
+    gold: fresh.gold, spawnCost: fresh.spawnCost,
+    dpsMult: fresh.dpsMult, goldMult: fresh.goldMult,
   }));
 
   setAdCooldownUntil(0);
@@ -1072,122 +1990,31 @@ async function resetGame() {
   save();
 }
 
-// ===== Gifts: weights & handlers =====
-function rollGiftType() {
-  const r = Math.random();
-  if (r < 0.70) return "coins";
-  if (r < 0.90) return "dog";
-  if (r < 0.95) return "dps";
-  return "gold";
-}
-function chooseGiftDogLevel(s) {
-  const base = Math.max(1, (s.spawnLevel || 1) - 1);
-  const alt  = Math.max(1, base - 1);
-  const hasAlt = Object.values(s.miners || {}).some(m => m.level === alt);
-  return hasAlt ? alt : base;
-}
-function trySpawnDogOrConvert(s, level) {
-  if (countMiners(s) < MAX_MINERS) {
-    const ok = spawnMiner(s, level);
-    if (!ok) {
-      const add = Math.max(10, s.spawnCost || 50);
-      s.gold += add; setUi(u => ({ ...u, gold: s.gold }));
-      setGiftToastWithTTL(`Board full → converted to +${formatShort(add)} coins`);
-    }
-  } else {
-    const add = Math.max(10, s.spawnCost || 50);
-    s.gold += add; setUi(u => ({ ...u, gold: s.gold }));
-    setGiftToastWithTTL(`Board full → converted to +${formatShort(add)} coins`);
-  }
-  save?.();
-}
+// === END PART 6 ===
 
-// ===== Auto-dog banking (every 15m, bank up to 6; offline accrue) =====
-function accrueBankDogsByElapsed(s, elapsedMs) {
-  if (!s) return;
-  const total = (typeof DOG_INTERVAL_SEC !== "undefined" ? DOG_INTERVAL_SEC : 900) * 1000;
-  if (total <= 0) return;
-  let add = Math.floor(elapsedMs / total);
-  if (add <= 0) return;
-  const cap = (typeof DOG_BANK_CAP !== "undefined" ? DOG_BANK_CAP : 6);
-  const cur = s.autoDogBank || 0;
-  const room = Math.max(0, cap - cur);
-  add = Math.min(add, room);
-  if (add > 0) {
-    s.autoDogBank = cur + add;
-    s.autoDogLastAt = Date.now();
-  }
-}
-function tryDistributeBankDog(s) {
-  if (!s) return;
-  if ((s.autoDogBank || 0) <= 0) return;
-  if (countMiners(s) >= MAX_MINERS) return; // אין מקום — נשאר בבנק
-  const lvl = chooseGiftDogLevel(s);
-  const ok = spawnMiner(s, lvl);
-  if (ok) {
-    s.autoDogBank -= 1;
-    setGiftToastWithTTL(`🐶 Bank → Deployed (LV ${lvl})`);
-    save?.();
-  }
-}
 
-// ===== OFFLINE mining up to 12h =====
-function handleOfflineAccrual(s, elapsedMs) {
-  if (!s) return 0;
-  // צבור כלבים אוטומטיים גם בזמן OFFLINE
-  accrueBankDogsByElapsed(s, elapsedMs);
-
-  const CAP_MS = 12 * 60 * 60 * 1000; // 12h
-  const simMs = Math.min(elapsedMs, CAP_MS);
-  let totalCoins = 0;
-
-  for (let lane = 0; lane < LANES; lane++) {
-    let dps = laneDpsSum(s, lane);
-    if (dps <= 0) continue;
-
-    // מצב סלע נוכחי במסילה
-    let idx = s.lanes[lane].rock.idx;
-    let hp  = s.lanes[lane].rock.hp;
-    let maxHp = s.lanes[lane].rock.maxHp;
-    let timeLeft = simMs / 1000;
-
-    while (timeLeft > 0 && dps > 0) {
-      const timeToBreak = hp / dps;
-      if (timeToBreak > timeLeft) {
-        // לא מספיק זמן לשבירה מלאה
-        hp -= dps * timeLeft;
-        timeLeft = 0;
-      } else {
-        // שברנו את הסלע
-        totalCoins += Math.floor(maxHp * GOLD_FACTOR * (s.goldMult || 1));
-        timeLeft -= timeToBreak;
-        idx += 1;
-        const rk = newRock(lane, idx);
-        hp = rk.hp; maxHp = rk.maxHp;
-      }
-    }
-
-    // עדכן מצב המסילה בהתאם לסימולציה
-    s.lanes[lane].rock = { lane, idx, maxHp, hp: Math.max(1, Math.floor(hp)) };
-    s.lanes[lane].rockCount = idx;
-  }
-
-  if (totalCoins > 0) {
-    s.pendingOfflineGold = (s.pendingOfflineGold || 0) + totalCoins;
-  }
-  return totalCoins;
-}
+// === START PART 7 ===
 
 // ===== Diamonds chest (3×💎 to claim when you choose) =====
 function grantDiamondPrize(s, key) {
-  const base = Math.max(20, expectedGiftCoinReward(s)); // <<< גם היהלומים לפי כל הסלעים
+  const base = Math.max(20, expectedGiftCoinReward(s));
   if (key === "coins_x10")   { const g = base * 10;   s.gold += Math.round(g); setGiftToastWithTTL(`💎 +${formatShort(g)} coins`); }
   else if (key === "coins_x100") { const g = base * 100; s.gold += Math.round(g); setGiftToastWithTTL(`💎 +${formatShort(g)} coins`); }
   else if (key === "coins_x1000"){ const g = base * 1000; s.gold += Math.round(g); setGiftToastWithTTL(`💎 +${formatShort(g)} coins`); }
   else if (key.startsWith("dog+")) {
     const delta = parseInt(key.split("+")[1] || "3", 10);
     const lvl = Math.max(1, (stateRef.current?.spawnLevel || 1) + delta);
-    trySpawnDogOrConvert(s, lvl);
+    if (countMiners(s) < MAX_MINERS) {
+      const placed = spawnMiner(s, lvl);
+      if (placed) {
+        setGiftToastWithTTL(`💎 Dog (LV ${lvl})`);
+        s.giftReady  = false;
+        s.giftNextAt = Date.now() + currentGiftIntervalSec(s) * 1000;
+      }
+    } else {
+      s.pendingDiamondDogLevel = lvl;
+      setGiftToastWithTTL(`💎 Dog (LV ${lvl}) pending — free a slot`);
+    }
   }
   setUi(u => ({ ...u, gold: s.gold }));
 }
@@ -1200,484 +2027,1388 @@ function openDiamondChestIfReady() {
   s.nextDiamondPrize = rollDiamondPrize();
   save();
 }
-// === END PART 4 ===
 
-
-
-// === START PART 5 ===
 // HUD computed values + Gift heartbeat + EARN cooldown
 
-const DOG_INTERVAL_SEC = (typeof window !== "undefined" && window.DOG_INTERVAL_SEC) || 15*60;
-const DOG_BANK_CAP = (typeof window !== "undefined" && window.DOG_BANK_CAP) || 6;
+const DOG_INTERVAL_SEC = (typeof window !== "undefined" && window.DOG_INTERVAL_SEC) || 600;
+const DOG_BANK_CAP     = (typeof window !== "undefined" && window.DOG_BANK_CAP)     || 6;
 
 const _currentGiftIntervalSec = typeof currentGiftIntervalSec==="function"?currentGiftIntervalSec:(s)=>Math.max(5,Math.floor(s?.lastGiftIntervalSec||20));
 const _getPhaseInfo = typeof getPhaseInfo==="function"?getPhaseInfo:(s,now=Date.now())=>{ const sec=_currentGiftIntervalSec(s,now); return { index:0,into:0,remain:sec,intervalSec:sec }; };
 
-// heartbeat מתנות – רץ כל חצי שנייה
-useEffect(()=>{ const id=setInterval(()=>{ const s=stateRef.current; if(!s) return; const now=Date.now(); const intervalMs=_currentGiftIntervalSec(s)*1000; if(!s.giftNextAt){ s.giftNextAt=now+intervalMs; s.giftReady=false; save(); return; } if(!s.giftReady && s.giftNextAt<=now){ s.giftReady=true; setGiftReadyFlag(true); save(); }},500); return()=>clearInterval(id); },[]);
+const giftProgress = (() => { 
+  const s = stateRef.current; if (!s) return 0; 
+  if (s.giftReady) return 1; 
+  const now = Date.now(); 
+  const total = _currentGiftIntervalSec(s, now) * 1000; 
+  const remain = Math.max(0, (s.giftNextAt || now) - now); 
+  return Math.max(0, Math.min(1, 1 - remain / total)); 
+})();
 
-// Phase label
-const phaseNow=(()=>{const s=stateRef.current; if(!s) return {index:0,intervalSec:20,remain:20}; return _getPhaseInfo(s,Date.now());})();
-const phaseLabel=`⏳ ${phaseNow.intervalSec}s gifts`;
+const dogProgress = (() => {
+  const s = stateRef.current; if (!s) return 0;
+  if ((s.autoDogBank || 0) >= DOG_BANK_CAP) return 1;
+  const now = Date.now();
+  const total = DOG_INTERVAL_SEC * 1000;
+  const remain = Math.max(0, (s.autoDogNextAt || (now + total)) - now);
+  return Math.max(0, Math.min(1, 1 - remain / total));
+})();
 
-// progress rings
-const giftProgress=(()=>{ const s=stateRef.current; if(!s) return 0; if(s.giftReady) return 1; const now=Date.now(); const total=_currentGiftIntervalSec(s,now)*1000; const remain=Math.max(0,(s.giftNextAt||now)-now); return Math.max(0,Math.min(1,1-remain/total)); })();
-const dogProgress=(()=>{ const s=stateRef.current; if(!s) return 0; if((s.autoDogBank||0)>=DOG_BANK_CAP) return 1; const now=Date.now(); const total=DOG_INTERVAL_SEC*1000; const last=s.autoDogLastAt||now; const elapsed=Math.max(0,now-last); return Math.max(0,Math.min(1,elapsed/total)); })();
 
-// circleStyle
-function circleStyle(progress,withBg=true){ const p=Math.max(0,Math.min(1,Number(progress)||0)); const deg=Math.round(360*p); const base=withBg?"radial-gradient(circle at 50% 50%, rgba(0,0,0,0.35) 55%, transparent 56%)":"transparent"; return { backgroundImage:`${base}, conic-gradient(#facc15 ${deg}deg, rgba(255,255,255,0.14) 0deg)`, transition:"background-image 0.2s linear" }; }
+const diamondsReady = (stateRef.current?.diamonds || 0) >= 3;
 
-// ADD cooldown
+function ringBg(progress){
+  const p   = Math.max(0, Math.min(1, Number(progress) || 0));
+  const deg = Math.round(360 * p);
+  return {
+    background: `conic-gradient(#facc15 ${deg}deg, transparent 0)`,
+    WebkitMask: "radial-gradient(transparent 12px, #000 13px)",
+    mask:       "radial-gradient(transparent 12px, #000 13px)",
+    borderRadius: "9999px",
+    transition: "background 0.2s linear",
+  };
+}
+
+// ADD cooldown + onAdd
 const sNow=stateRef.current;
 const nowMs=Date.now();
 const cooldownUntil=sNow?.adCooldownUntil||0;
 const addRemainMs=mounted?Math.max(0,cooldownUntil-nowMs):Number.POSITIVE_INFINITY;
 const addProgress=mounted?1-Math.min(1,addRemainMs/(10*60*1000)):0;
-const addRemainLabel=(()=>{ if(!mounted) return "…"; if(addRemainMs<=0) return "READY"; const m=Math.floor(addRemainMs/60000); const s=Math.floor((addRemainMs%60000)/1000); return `${m}:${String(s).padStart(2,"0")}`;})();
-const addDisabled=addRemainMs>0||adWatching;
+const addRemainLabel=(()=>{ 
+  if(!mounted) return "…"; 
+  if(addRemainMs<=0) return "READY"; 
+  const m=Math.floor(addRemainMs/60000); 
+  const s=Math.floor((addRemainMs%60000)/1000); 
+  return `${m}:${String(s).padStart(2,"0")}`;
+})();
+const addDisabled = addRemainMs > 0;
 
-// prices
+function onAdd(){ 
+  try{play?.(S_CLICK);}catch{} 
+  const s=stateRef.current;if(!s) return; 
+  const now=Date.now(); 
+  if(now<(s.adCooldownUntil||0)){ 
+    const remain=Math.ceil(((s.adCooldownUntil||0)-now)/1000); 
+    const m=Math.floor(remain/60),sec=String(remain%60).padStart(2,"0"); 
+    if(typeof setGiftToast==="function"){ 
+      const id=Math.random().toString(36).slice(2); 
+      setGiftToast({text:`Ad bonus in ${m}:${sec}`,id}); 
+      setTimeout(()=>{setGiftToast(cur=>(cur&&cur.id===id?null:cur));},2000);
+    } 
+    return; 
+  } 
+  setAdVideoEnded(false); 
+  setShowAdModal(true); 
+}
+
+// Coins modal (details + claim-to-mining)
+const [showCoinsModal, setShowCoinsModal] = useState(false);
+
+function claimCoinsToMining() {
+  try { play?.(S_CLICK); } catch {}
+
+  const s = stateRef.current; 
+  if (!s) return;
+
+  const coins = Number(s.gold || 0);
+  if (!coins) { setGiftToastWithTTL("No coins to claim"); return; }
+
+  const eff = previewMleoFromCoins(coins);
+  if (!eff) { setGiftToastWithTTL("Daily cap reached or nothing to add"); return; }
+
+  const mst = loadMiningState();
+  const today = getTodayKey();
+  if (mst.lastDay !== today) { mst.minedToday = 0; mst.scoreToday = 0; mst.lastDay = today; }
+
+  const room = Math.max(0, DAILY_CAP - (mst.minedToday || 0));
+  const add  = Math.min(eff, room);
+
+  mst.minedToday += add;
+  mst.balance    += add;
+
+  saveMiningState(mst);
+  setMining(mst);
+
+  setGiftToastWithTTL(`Claimed ${formatMleoShort(add)} MLEO from coins`);
+
+}
+
+// ===== HUD Info modal state & content =====
+const [hudModal, setHudModal] = useState(null);
+function getHudModalTitle(k){
+  switch(k){
+    case 'coins': return 'Coins';
+    case 'dps': return 'DPS Multiplier';
+    case 'gold': return 'Gold Multiplier';
+    case 'spawn': return 'Dog Spawn Level';
+    case 'lvCounter': return 'Spawn LV Counter';
+    case 'gifts': return 'Gift Phases';
+    case 'giftRing': return 'Gift Timer';
+    case 'dogRing': return 'Auto-Dog';
+    default: return 'Info';
+  }
+}
+function getHudModalText(k){
+  switch(k){
+    case 'coins':
+      return 'Your total coins. Breaking rocks adds coins; bonuses: 🎁 regular gift (10%), video ad (50%), and diamonds grant large multipliers.';
+    case 'dps':
+      return '🪓 DPS xN increases the rate rocks lose HP by 10% per upgrade.';
+    case 'gold':
+      return '🟡 GOLD xN increases the coins gained from each rock by 10% per upgrade.';
+    case 'spawn':
+      return `🦊 LV shows the dog level that appears on purchase/bonus. 
+Increases automatically after 30 purchases.
+
+Purchases left to the next level: ${toNextLv}.`;
+    case 'gifts':
+      return '⏳ Interval between gifts. Each time the timer ends you get a gift: coins/dog/boosts/diamond.';
+    case 'giftRing':
+      return 'The ring around 🎁 shows progress to the next gift, based on the displayed timings.';
+    case 'dogRing':
+      return 'The ring around 🦊 shows progress toward an auto-dog. When the bank is full (up to 6), it will deploy when a slot is free.';
+    default:
+      return '';
+  }
+}
+
+// prices & יכולת קנייה לשורת הפעולות
 const spawnCostNow=sNow?.spawnCost??ui.spawnCost;
 const dpsCostNow=(typeof _dpsCost==="function")?_dpsCost(sNow):160;
 const goldCostNow=(typeof _goldCost==="function")?_goldCost(sNow):160;
 const canBuyMiner=!!sNow&&sNow.gold>=spawnCostNow&&Object.keys(sNow.miners||{}).length<(typeof MAX_MINERS==="number"?MAX_MINERS:16);
 const canBuyDps=!!sNow&&sNow.gold>=dpsCostNow;
 const canBuyGold=!!sNow&&sNow.gold>=goldCostNow;
-const price=(n)=>formatShort(n??0);
+const boughtCount = sNow?.totalPurchased || 0;
+const toNextLv    = 30 - (boughtCount % 30);
+const BTN_H = `h-[${UI_BTN_H_PX}px]`;             // כבר קיים אצלך – ודא שזה טמפלייט סטרינג
+const BTN_W = `min-w-[${UI_BTN_MIN_W_PX}px]`;     // חדש: רוחב מינימלי
+const RING_SZ = "w-[60px] h-[60px]";
+const BTN_BASE =
+  "appearance-none inline-flex items-center justify-center gap-1 px-3 !py-0 rounded-xl font-extrabold text-[16px] md:text-[18px] leading-none whitespace-nowrap transition ring-2";
 
-// EARN button
-function onAdd(){ try{play?.(S_CLICK);}catch{} const s=stateRef.current;if(!s) return; const now=Date.now(); if(now<(s.adCooldownUntil||0)){ const remain=Math.ceil(((s.adCooldownUntil||0)-now)/1000); const m=Math.floor(remain/60),sec=String(remain%60).padStart(2,"0"); if(typeof setGiftToast==="function"){ const id=Math.random().toString(36).slice(2); setGiftToast({text:`Ad bonus in ${m}:${sec}`,id}); setTimeout(()=>{setGiftToast(cur=>(cur&&cur.id===id?null:cur));},2000);} return; } setAdVideoEnded(false); setShowAdModal(true); }
-// === END PART 5 ===
+const BTN_DIS  = "opacity-60 cursor-not-allowed";
 
- 
+// === END PART 7 ===
 
-// === START PART 6 ===
-  // ===== Render =====
-  return (
-    <Layout>
-      <div
-        ref={wrapRef}
-        className="flex flex-col items-center justify-start bg-gray-900 text-white min-h-screen w-full relative overflow-hidden select-none"
-      >
-        {/* Landscape overlay on mobile */}
-        {isMobileLandscape && (
-          <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black text-white text-center p-6">
-            <div>
-              <h2 className="text-2xl font-extrabold mb-3">Please rotate your device to portrait.</h2>
-              <p className="opacity-80">Landscape is not supported.</p>
-            </div>
+
+// === START PART 8 ===
+
+  // ——— iOS detection ———
+const [isIOS, setIsIOS] = useState(false);
+const HUD_TOP_IOS_PX = 0;
+const HUD_TOP_ANDROID_PX = 5;
+
+// ——— Track fullscreen state ———
+const [isFullscreen, setIsFullscreen] = useState(false);
+
+useEffect(() => {
+  try {
+    const ua = navigator.userAgent || "";
+    const isiOS =
+      /iP(hone|ad|od)/.test(ua) ||
+      ((/Macintosh/.test(ua) || /Mac OS X/.test(ua)) && "ontouchend" in document);
+    setIsIOS(isiOS);
+  } catch {}
+
+  const onFS = () => setIsFullscreen(!!document.fullscreenElement);
+  document.addEventListener("fullscreenchange", onFS);
+  onFS();
+  return () => document.removeEventListener("fullscreenchange", onFS);
+}, []);
+
+const hudTop = `calc(env(safe-area-inset-top, 0px) + ${(isIOS ? HUD_TOP_IOS_PX : HUD_TOP_ANDROID_PX)}px)`;
+return (
+
+<Layout>
+  <div
+    ref={wrapRef}
+    className="
+      relative flex flex-col items-center justify-start
+      bg-gray-900 text-white
+      w-full h-full overflow-hidden select-none
+    "
+  >
+
+      {/* Landscape overlay on mobile */}
+      {isMobileLandscape && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black text-white text-center p-6">
+          <div>
+            <h2 className="text-2xl font-extrabold mb-3">Please rotate your device to portrait.</h2>
+            <p className="opacity-80">Landscape is not supported.</p>
           </div>
-        )}
-
-        {/* Intro Overlay */}
-        {showIntro && (
-          <div className="absolute inset-0 flex flex-col items-center justify-start pt-10 bg-black/80 z-[50] text-center p-6">
-            <img src="/images/leo-intro.png" alt="Leo" width={160} height={160} className="mb-4 rounded-full" />
-            <h1 className="text-3xl sm:text-4xl font-extrabold text-yellow-400 mb-2">⛏️ MLEO Miners</h1>
-
-            <p className="text-sm sm:text-base text-gray-200 mb-6">Merge miners, break rocks, earn gold.</p>
-
-            <div className="flex gap-3 flex-wrap justify-center">
-              <button
-                onClick={async () => {
-                  try { play?.(S_CLICK); } catch {}
-                  const s = stateRef.current;
-                  if (s && !s.onceSpawned) { spawnMiner(s, 1); s.onceSpawned = true; save(); }
-                  setShowIntro(false);
-                  setGamePaused(false);
-                  try { await enterFullscreenAndLockMobile(); } catch {}
-                }}
-                className="px-5 py-3 font-bold rounded-lg text-base shadow bg-indigo-400 hover:bg-indigo-300 text-black"
-              >
-                CONNECT WALLET
-              </button>
-
-              <button
-                onClick={async () => {
-                  try { play?.(S_CLICK); } catch {}
-                  const s = stateRef.current;
-                  if (s && !s.onceSpawned) { spawnMiner(s, 1); s.onceSpawned = true; save(); }
-                  setShowIntro(false);
-                  setGamePaused(false);
-                  try { await enterFullscreenAndLockMobile(); } catch {}
-                }}
-                className="px-5 py-3 font-bold rounded-lg text-base shadow bg-yellow-400 hover:bg-yellow-300 text-black"
-              >
-                SKIP
-              </button>
-
-              <button
-                onClick={() => setShowHowTo(true)}
-                className="px-5 py-3 font-bold rounded-lg text-base shadow bg-emerald-400 hover:bg-emerald-300 text-black"
-              >
-                HOW TO PLAY
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* HOW TO modal */}
-        {showHowTo && (
-          <div className="fixed inset-0 z-[10000] bg-black/70 flex items-center justify-center p-4">
-            <div className="bg-white text-slate-900 max-w-lg w-full rounded-2xl p-5 shadow-2xl">
-              <h2 className="text-2xl font-extrabold mb-3">How to Play</h2>
-              <ul className="list-disc pl-5 space-y-2 text-sm">
-                <li>Merge two same-level miners to upgrade.</li>
-                <li>Breaking rocks yields coins that scale with rock level.</li>
-                <li>Regular Gift = <b>10%</b> of the multi-lane reward.</li>
-                <li>Ad Gift (after video) = <b>50%</b> of the multi-lane reward.</li>
-                <li>Diamond Chest (3💎) gives large coin multipliers or dog levels.</li>
-              </ul>
-              <div className="flex justify-end mt-4">
-                <button
-                  onClick={() => setShowHowTo(false)}
-                  className="px-4 py-2 rounded-lg bg-slate-900 text-white hover:bg-slate-800"
-                >
-                  Got it
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* ADD Ad Modal */}
-        {showAdModal && (
-          <div className="fixed inset-0 z-[10000] bg-black/80 flex items-center justify-center p-4">
-            <div className="bg-white text-slate-900 max-w-md w-full rounded-2xl p-5 shadow-2xl">
-              <h2 className="text-xl font-extrabold mb-3">Watch to Earn</h2>
-
-              <video
-                src="/ads/ad1.mp4"
-                className="w-full rounded-lg bg-black"
-                controls
-                autoPlay
-                onEnded={() => setAdVideoEnded(true)}
-              />
-
-              <div className="flex justify-between items-center mt-4">
-                <button
-                  onClick={() => { setShowAdModal(false); setAdVideoEnded(false); }}
-                  className="px-4 py-2 rounded-lg bg-slate-200 hover:bg-slate-300 text-slate-900"
-                >
-                  Close
-                </button>
-
-                <button
-                  onClick={() => {
-                    const s = stateRef.current; if (!s) return;
-                    const base = Math.max(20, expectedGiftCoinReward(s));
-                    const gain = Math.round(base * 0.50); // 50%
-                    s.gold += gain; setUi(u => ({ ...u, gold: s.gold }));
-
-                    // קובע קולדאון 10 דקות — נשמר גם ב-state וגם ב-LS
-                    const until = Date.now() + 10*60*1000;
-                    s.adCooldownUntil = until;     // מקור האמת
-                    setAdCooldownUntil(until);      // ל־UI
-                    try {
-                      const raw = localStorage.getItem(LS_KEY);
-                      const data = raw ? JSON.parse(raw) : {};
-                      data.adCooldownUntil = until;
-                      localStorage.setItem(LS_KEY, JSON.stringify(data));
-                    } catch {}
-
-                    setGiftToastWithTTL(`🎬 Ad Reward +${formatShort(gain)} coins`, 3000);
-                    save();
-                    setShowAdModal(false);
-                    setAdVideoEnded(false);
-                  }}
-                  disabled={!adVideoEnded}
-                  className={`px-4 py-2 rounded-lg font-bold ${
-                    adVideoEnded ? "bg-yellow-400 hover:bg-yellow-300 text-black" : "bg-slate-300 text-slate-500 cursor-not-allowed"
-                  }`}
-                  title={adVideoEnded ? "Collect your reward" : "Watch until the end to unlock"}
-                >
-                  COLLECT
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* ===== Title ===== */}
-        <h1 className="text-xl sm:text-2xl font-extrabold tracking-tight mt-4 mb-4 leading-none">
-          MLEO Miners — v5.8
-        </h1>
-
-        {/* ===== Canvas wrapper ===== */}
-        <div
-          id="miners-canvas-wrap"
-          className="relative w-full border border-slate-700 rounded-2xl overflow-hidden shadow-2xl"
-          style={{ maxWidth: isDesktop ? "1024px" : "680px", aspectRatio: isDesktop ? "4 / 3" : "9 / 16" }}
-        >
-          <canvas id="miners-canvas" ref={canvasRef} className="w-full h-full block touch-none select-none" />
-
-          {/* ==== TOP HUD ==== */}
-          <div className="absolute left-1/2 -translate-x-1/2 top-1 z-[30] w-[calc(100%-16px)] max-w-[980px]">
-            <div className="flex gap-2 flex-wrap justify-center items-center text-sm">
-              {/* Gold + ring (using addProgress visually) */}
-              <div className="px-2 py-1 bg-black/60 rounded-lg shadow flex items-center gap-2">
-                <div
-                  className="relative w-8 h-8 rounded-full grid place-items-center"
-                  style={circleStyle(addProgress, true)}
-                  title={addRemainMs > 0 ? `Next ad in ${addRemainLabel}` : "Ad bonus ready"}
-                >
-                  <div className="w-6 h-6 rounded-full bg-black/70 grid place-items-center">
-                    <img src={IMG_COIN} alt="coin" className="w-4 h-4" />
-                  </div>
-                </div>
-                <b>{formatShort(stateRef.current?.gold ?? 0)}</b>
-              </div>
-
-              <div className="px-2 py-1 bg-black/60 rounded-lg shadow">🪓 x<b>{(stateRef.current?.dpsMult || 1).toFixed(2)}</b></div>
-              <div className="px-2 py-1 bg-black/60 rounded-lg shadow">🟡 x<b>{(stateRef.current?.goldMult || 1).toFixed(2)}</b></div>
-              <div className="px-2 py-1 bg-black/60 rounded-lg shadow">🐶 LV <b>{stateRef.current?.spawnLevel || 1}</b></div>
-
-              {/* Diamonds counter (clickable) */}
-              <button
-                onClick={() => setShowDiamondInfo(true)}
-                className="px-2 py-1 bg-black/70 rounded-lg shadow flex items-center gap-1 hover:bg-black/60 active:scale-95 transition cursor-pointer"
-                aria-label="Diamond rewards info"
-                title="Tap to open Diamond chest"
-              >
-                <span>💎</span>
-                <b>{stateRef.current?.diamonds ?? 0}</b>
-                <span className="opacity-80">/3</span>
-              </button>
-
-              <div className="px-2 py-1 bg-black/60 rounded-lg shadow">{phaseLabel}</div>
-
-              <div className="flex items-center gap-3 ml-2">
-                <div
-                  className="relative w-8 h-8 rounded-full grid place-items-center"
-                  style={circleStyle(giftProgress, true)}
-                  title={phaseLabel}
-                >
-                  <div className="w-6 h-6 rounded-full bg-black/70 grid place-items-center text-[10px] font-extrabold">🎁</div>
-                </div>
-                <div
-                  className="relative w-8 h-8 rounded-full grid place-items-center"
-                  style={circleStyle(dogProgress, true)}
-                  title="Auto-dog every 15m (bank up to 6)"
-                >
-                  <div className="w-6 h-6 rounded-full bg-black/70 grid place-items-center text-[10px] font-extrabold">🐶</div>
-                </div>
-              </div>
-            </div>
-
-            {/* Actions row */}
-            <div className="flex gap-2 mt-2 flex-wrap justify-center text-sm">
-              <button
-                onClick={addMiner}
-                disabled={!canBuyMiner}
-                className={`px-3 py-1.5 rounded-xl text-slate-900 font-bold shadow transition
-                  ${canBuyMiner
-                    ? "bg-emerald-500 hover:bg-emerald-400 ring-2 ring-emerald-300 shadow-[0_0_18px_rgba(16,185,129,.55)]"
-                    : "bg-emerald-500 opacity-60 cursor-not-allowed"}`}
-              >
-                + 🐶 Miner (LV {stateRef.current?.spawnLevel || 1}) — {formatShort(spawnCostNow)}
-              </button>
-
-              <button
-                onClick={upgradeDps}
-                disabled={!canBuyDps}
-                className={`h-8 px-2.5 rounded-lg text-[13px] leading-none inline-flex items-center
-                  text-slate-900 font-bold shadow-sm transition
-                  ${canBuyDps
-                    ? "bg-sky-500 hover:bg-sky-400 ring-2 ring-sky-300 shadow-[0_0_18px_rgba(56,189,248,.55)]"
-                    : "bg-sky-500 opacity-60 cursor-not-allowed"}`}
-              >
-                🪓 +10% (Cost {formatShort(dpsCostNow)})
-              </button>
-
-              <button
-                onClick={upgradeGold}
-                disabled={!canBuyGold}
-                className={`px-3 py-1.5 rounded-xl text-slate-900 font-bold shadow transition
-                  ${canBuyGold
-                    ? "bg-amber-400 hover:bg-amber-300 ring-2 ring-amber-300 shadow-[0_0_18px_rgba(251,191,36,.6)]"
-                    : "bg-amber-400 opacity-60 cursor-not-allowed"}`}
-              >
-                🟡 +10% (Cost {formatShort(goldCostNow)})
-              </button>
-
-              {/* GAIN */}
-              <button
-                onClick={onAdd}
-                disabled={addDisabled}
-                className={`px-3 py-1.5 rounded-xl text-slate-900 font-bold shadow transition
-                  ${addDisabled
-                    ? "bg-indigo-400 opacity-60 cursor-not-allowed"
-                    : "bg-indigo-400 hover:bg-indigo-300 ring-2 ring-indigo-300 shadow-[0_0_18px_rgba(129,140,248,.45)]"}`}
-                title={addRemainMs > 0 ? `Ad bonus in ${addRemainLabel}` : "Watch ad to earn"}
-              >
-                GAIN {addRemainMs > 0 ? `(${addRemainLabel})` : ""}
-              </button>
-
-              <button
-                onClick={() => setShowResetConfirm(true)}
-                className="px-3 py-1.5 rounded-xl bg-rose-500 hover:bg-rose-400 text-white font-bold shadow transition ring-2 ring-rose-300"
-                title="Reset all progress"
-              >
-                RESET
-              </button>
-            </div>
-          </div>
-
-          {/* Toast (gift result) */}
-          {giftToast && (
-            <div className="absolute left-1/2 -translate-x-1/2 z-[7]" style={{ top: "200px" }}>
-              <div className="px-4 py-2 rounded-xl bg-emerald-400 text-black font-extrabold shadow-lg animate-[fadeOut_3s_ease-out_forwards]">
-                {giftToast.text}
-              </div>
-              <style jsx global>{`
-                @keyframes fadeOut {
-                  0% { opacity: 0; transform: translateY(-6px) scale(0.96); }
-                  15% { opacity: 1; transform: translateY(0) scale(1); }
-                  80% { opacity: 1; }
-                  100% { opacity: 0; transform: translateY(-10px) scale(0.98); }
-                }
-              `}</style>
-            </div>
-          )}
-
-          {/* Center Gift Button */}
-          {!showIntro && !gamePaused && !showCollect && giftReadyFlag && (
-            <div className="absolute inset-0 z-[8] flex items-center justify-center pointer-events-none">
-              <button
-                onClick={grantGift}
-                className="pointer-events-auto px-5 py-3 rounded-2xl font-extrabold text-black shadow-2xl bg-gradient-to-br from-yellow-300 to-amber-400 border border-yellow-200 hover:from-yellow-200 hover:to-amber-300 active:scale-95 relative"
-              >
-                🎁 Claim Gift
-                <span className="absolute -inset-2 rounded-3xl blur-3xl bg-yellow-400/30 -z-10" />
-              </button>
-            </div>
-          )}
         </div>
+      )}
 
-        {/* Offline COLLECT overlay */}
-        {showCollect && (
-          <div className="fixed inset-0 z-[9998] flex items-center justify-center bg-black/85 px-6 text-center">
-            <div className="bg-white/10 backdrop-blur rounded-2xl p-6 border border-white/20 shadow-2xl max-w-sm w-full">
-              <div className="flex items-center justify-center gap-2 mb-3">
-                <img src={IMG_COIN} alt="coin" className="w-6 h-6" />
-                <h3 className="text-xl font-extrabold text-white">While you were away…</h3>
-              </div>
-              <p className="text-gray-200 mb-4">
-                Earned{" "}
-                <b className="text-yellow-300">{formatShort(stateRef.current?.pendingOfflineGold || 0)}</b>{" "}
-                coins in the background.
-              </p>
+ <PortalModal open={showIntro} z={10002}>
+  <div
+    className="fixed inset-0 bg-black/80 z-[10002] flex flex-col items-center justify-start pt-10 text-center p-6"
+    style={{ WebkitTapHighlightColor: "transparent", touchAction: "manipulation" }}
+  >
+    <img src="/images/leo-intro.png" alt="Leo" width={160} height={160} className="mb-4 rounded-full" />
+    <h1 className="text-3xl sm:text-4xl font-extrabold text-yellow-400 mb-2">⛏️ MLEO Miners</h1>
+    <p className="text-sm sm:text-base text-gray-200 mb-4">Merge miners, break rocks, earn gold.</p>
+
+    {firstTimeNeedsTerms && (
+      <div className="mb-4 w-full max-w-md">
+        <div className="px-3 py-2 rounded-lg bg-yellow-300/20 text-yellow-200 border border-yellow-300/40 text-xs sm:text-sm">
+          You must read and accept the <b>Terms &amp; Conditions</b> before playing for the first time.
+        </div>
+      </div>
+    )}
+
+    <div className="flex gap-3 flex-wrap justify-center">
+      <button
+        onClick={async () => {
+          try { play?.(S_CLICK); } catch {}
+          if (firstTimeNeedsTerms) { setShowTerms(true); return; }
+          const s = stateRef.current;
+          if (s && !s.onceSpawned) { spawnMiner(s, 1); s.onceSpawned = true; save(); }
+          setShowIntro(false);
+          setGamePaused(false);
+          try { await enterFullscreenAndLockMobile(); } catch {}
+          setTimeout(() => {
+            if (isConnected) openAccountModal?.(); else openConnectModal?.();
+          }, 0);
+        }}
+        className="px-5 py-3 font-bold rounded-lg text-base shadow bg-indigo-400 hover:bg-indigo-300 text-black"
+        style={{ touchAction: "manipulation" }}
+      >
+        CONNECT WALLET
+      </button>
+
+      <button
+        onClick={async () => {
+          try { play?.(S_CLICK); } catch {}
+          if (firstTimeNeedsTerms) { setShowTerms(true); return; }
+          const s = stateRef.current;
+          if (s && !s.onceSpawned) { spawnMiner(s, 1); s.onceSpawned = true; save(); }
+          setShowIntro(false);
+          setGamePaused(false);
+          try { await enterFullscreenAndLockMobile(); } catch {}
+        }}
+        className="px-5 py-3 font-bold rounded-lg text-base shadow bg-yellow-400 hover:bg-yellow-300 text-black"
+        style={{ touchAction: "manipulation" }}
+      >
+        PLAY
+      </button>
+
+      <button
+        onClick={() => setShowHowTo(true)}
+        className="px-5 py-3 font-bold rounded-lg text-base shadow bg-emerald-400 hover:bg-emerald-300 text-black"
+        style={{ touchAction: "manipulation" }}
+      >
+        HOW TO PLAY
+      </button>
+
+      <button
+        onClick={() => setShowMiningInfo(true)}
+        className="px-5 py-3 font-bold rounded-lg text-base shadow bg-cyan-400 hover:bg-cyan-300 text-black"
+        style={{ touchAction: "manipulation" }}
+      >
+        MINING
+      </button>
+
+      <button
+        onClick={() => setShowTerms(true)}
+        className="px-5 py-3 font-bold rounded-lg text-base shadow bg-teal-400 hover:bg-teal-300 text-black"
+        style={{ touchAction: "manipulation" }}
+      >
+        TERMS
+      </button>
+    </div>
+  </div>
+</PortalModal>
+
+
+      {/* === END PART 8 === */}
+
+
+{/* === START PART 9 === */}
+                {/* ADD Ad Modal */}
+ <PortalModal open={showAdModal} z={10000}>
+   <div className="bg-black/80 fixed inset-0 flex items-center justify-center p-4">
+     <div className="bg-white text-slate-900 max-w-md w-full rounded-2xl p-5">
+            <h2 className="text-xl font-extrabold mb-3">Watch to Earn</h2>
+
+            <video
+              src="/ads/ad1.mp4"
+              className="w-full rounded-lg bg-black"
+              controls
+              autoPlay
+              onEnded={() => setAdVideoEnded(true)}
+            />
+
+            <div className="flex justify-between items-center mt-4">
               <button
-                onClick={onOfflineCollect}
-                className="mx-auto px-6 py-3 rounded-xl bg-yellow-400 text-black font-extrabold text-lg shadow active:scale-95"
+                onClick={() => { setShowAdModal(false); setAdVideoEnded(false); }}
+                className="px-4 py-2 rounded-lg bg-slate-200 hover:bg-slate-300 text-slate-900"
+              >
+                Close
+              </button>
+
+              <button
+                onClick={() => {
+                  const s = stateRef.current; if (!s) return;
+                  const base = Math.max(20, expectedGiftCoinReward(s));
+                  const gain = Math.round(base * 0.50);
+                  s.gold += gain; setUi(u => ({ ...u, gold: s.gold }));
+
+                  const until = Date.now() + 10*60*1000;
+                  s.adCooldownUntil = until;
+                  setAdCooldownUntil(until);
+                  try {
+                    const raw = localStorage.getItem(LS_KEY);
+                    const data = raw ? JSON.parse(raw) : {};
+                    data.adCooldownUntil = until;
+                    localStorage.setItem(LS_KEY, JSON.stringify(data));
+                  } catch {}
+
+                  setCenterPopup({ text: `🎬 +${formatShort(gain)} coins`, id: Math.random() });
+                  save();
+                  setShowAdModal(false);
+                  setAdVideoEnded(false);
+                }}
+                disabled={!adVideoEnded}
+                className={`px-4 py-2 rounded-lg font-bold ${
+                  adVideoEnded ? "bg-yellow-400 hover:bg-yellow-300 text-black" : "bg-slate-300 text-slate-500 cursor-not-allowed"
+                }`}
+                title={adVideoEnded ? "Collect your reward" : "Watch until the end to unlock"}
               >
                 COLLECT
               </button>
             </div>
           </div>
+        </div>
+      </PortalModal>
+
+{/* ===== Unified Canvas wrapper (no lanes changes) ===== */}
+<div
+  id="miners-canvas-wrap"
+className="relative w-full h-full rounded-2xl overflow-hidden mt-1 mx-auto border border-slate-700"
+    style={
+      isDesktop
+        ? { maxWidth: "1024px", aspectRatio: "4 / 3" }
+        : { maxWidth: "680px" } // במובייל בלי aspect-ratio, שיתפוס כל הגובה
+    }
+>
+  <canvas
+    id="miners-canvas"
+    ref={canvasRef}
+    className="w-full h-full block touch-none select-none"
+  />
+
+{SHOW_FLOATING_RESET && (
+  <div
+    className="absolute left-2 sm:left-3 z-[40]"
+    style={{ bottom: "calc(env(safe-area-inset-bottom, 0px) + 8px)" }}
+  >
+    <button
+      onClick={() => setShowResetConfirm(true)}
+      className="px-3 py-2 rounded-xl bg-rose-500 hover:bg-rose-400 ring-2 ring-rose-300 text-white font-extrabold text-xs shadow-md active:scale-95"
+      title="Reset all progress"
+    >
+      RESET
+    </button>
+  </div>
+)}
+
+
+        {/* ==== TOP HUD ==== */}
+        <div
+          className="absolute left-1/2 -translate-x-1/2 z-[30] w-[calc(100%-16px)] max-w-[980px]"
+          style={{ top: hudTop }}
+        >
+          <h1 className="text-xl sm:text-2xl md:text-3xl font-extrabold text-center mb-2">
+            MLEO — MINERS
+          </h1>
+
+        {/* Wallet status (clickable) */}
+<div className="absolute top-2 left-2 z-[40]">
+  <button
+    onClick={() => (isConnected ? openAccountModal?.() : openConnectModal?.())}
+    className={`${isConnected ? "bg-emerald-500/15 text-emerald-300" : "bg-white/10 text-white/70"} px-2 py-0.5 rounded-md text-[11px] font-semibold hover:opacity-90 active:scale-95 transition`}
+    title={isConnected ? "Wallet connected — tap for status" : "Wallet not connected — tap to connect"}
+  >
+    {isConnected ? "● Connected" : "○ Not connected"}
+  </button>
+</div>
+
+
+          {/* keep glow keyframes for diamonds + global UI pulses */}
+          <style jsx global>{`
+            @keyframes glowPulse {
+              0% { opacity: .55; transform: scale(.98); }
+              50% { opacity: 1; transform: scale(1); }
+              100% { opacity: .55; transform: scale(.98); }
+            }
+            @keyframes glowRing {
+              0% { opacity: .6; }
+              50% { opacity: 1; }
+              100% { opacity: .6; }
+            }
+            /* === added for CLAIM glow === */
+            @keyframes btnPulse {
+              0%   { box-shadow:0 0 0 0 rgba(250,204,21,.45); }
+              70%  { box-shadow:0 0 0 10px rgba(250,204,21,0); }
+              100% { box-shadow:0 0 0 0 rgba(250,204,21,0); }
+            }
+            /* === added for digits nudge === */
+            @keyframes nudge {
+              0%,100% { transform: translateY(0); }
+              50%     { transform: translateY(-1px); }
+            }
+          `}</style>
+
+          <div className="flex gap-2 flex-wrap justify-center items-center text-sm">
+            {/* Coins + ad ring */}
+            <button
+              onClick={()=>setHudModal('coins')}
+              className="px-2 py-1 rounded-lg flex items-center gap-2 hover:bg-white/10"
+              aria-label="Coins info"
+            >
+              <div className="relative w-8 h-8 rounded-full grid place-items-center" title={addRemainMs > 0 ? `Next ad in ${addRemainLabel}` : "Ad bonus ready"}>
+                <div className="absolute inset-0 rounded-full" style={ringBg(addProgress)} />
+                <img src={IMG_COIN} alt="coin" className="w-7 h-7" />
+              </div>
+              <b>{formatShort(stateRef.current?.gold ?? 0)}</b>
+            </button>
+
+            {/* DPS */}
+            <button onClick={()=>setHudModal('dps')} className="px-2 py-1 rounded-lg hover:bg-white/10">
+              🪓 x<b>{(stateRef.current?.dpsMult || 1).toFixed(2)}</b>
+            </button>
+
+            {/* GOLD */}
+            <button onClick={()=>setHudModal('gold')} className="px-2 py-1 rounded-lg hover:bg-white/10">
+              🟡 x<b>{(stateRef.current?.goldMult || 1).toFixed(2)}</b>
+            </button>
+
+            {/* Spawn LV (with inline counter) */}
+            <button
+              onClick={()=>setHudModal('spawn')}
+              className="px-2 py-1 rounded-lg hover:bg-white/10"
+              title={`Next Spawn Level in ${toNextLv} purchases`}
+            >
+              <span className="inline-flex items-baseline gap-1 leading-none">
+                <span>🦊 LV</span>
+                <b className="leading-none">{stateRef.current?.spawnLevel || 1}</b>
+                <span className="text-[11px] leading-none opacity-80 relative -top-[1px]">
+                  ({toNextLv})
+                </span>
+              </span>
+            </button>
+
+            {/* Diamonds */}
+            <button
+              onClick={() => setShowDiamondInfo(true)}
+              className="relative px-2 py-1 rounded-lg flex items-center gap-1 active:scale-95 transition hover:bg-white/10"
+              aria-label="Diamond rewards info"
+              title="Tap to open Diamond chest"
+            >
+              {diamondsReady && (
+                <>
+                  <span
+                    className="pointer-events-none absolute -inset-2 rounded-xl"
+                    style={{
+                      animation: "glowPulse 3.2s infinite",
+                      background: "radial-gradient(circle, rgba(250,204,21,0.35) 0%, rgba(250,204,21,0.18) 35%, transparent 60%)"
+                    }}
+                  />
+                  <span
+                    className="pointer-events-none absolute -inset-[6px] rounded-2xl"
+                    style={{
+                      animation: "glowRing 3.2s infinite",
+                      border: "2px solid rgba(250,204,21,0.55)"
+                    }}
+                  />
+                </>
+              )}
+              <span>💎</span>
+              <b>{stateRef.current?.diamonds ?? 0}</b>
+              <span className="opacity-80">/3</span>
+            </button>
+
+            {/* Phase label */}
+            <button onClick={()=>setHudModal('gifts')} className="px-2 py-1 rounded-lg hover:bg-white/10">
+              {`⏳ ${(_getPhaseInfo(stateRef.current, Date.now()).intervalSec)}s gifts`}
+            </button>
+
+            <div className="flex items-center gap-3 ml-2">
+              {/* 🎁 ring */}
+              <button
+                onClick={()=>setHudModal('giftRing')}
+                className="relative w-8 h-8 rounded-full grid place-items-center hover:opacity-90 active:scale-95 transition"
+                title={`⏳ ${(_getPhaseInfo(stateRef.current, Date.now()).intervalSec)}s gifts`}
+                aria-label="Gift timer info"
+              >
+                <div className="absolute inset-0 rounded-full" style={ringBg(giftProgress)} />
+                <div className="text-[22px] font-extrabold leading-none">🎁</div>
+              </button>
+
+              {/* 🦊 ring */}
+              <button
+                onClick={()=>setHudModal('dogRing')}
+                className="relative w-8 h-8 rounded-full grid place-items-center hover:opacity-90 active:scale-95 transition"
+                title={`Auto-dog every ${Math.round(DOG_INTERVAL_SEC/60)}m (bank up to ${DOG_BANK_CAP})`}
+                aria-label="Auto-dog info"
+              >
+                <div className="absolute inset-0 rounded-full" style={ringBg(dogProgress)} />
+                <div className="text-[22px] font-extrabold leading-none">🦊</div>
+              </button>
+
+{/* === [GAIN] button (RING like 🎁/🦊, same size) === */}
+<button
+  onClick={() => setShowGainModal(true)}
+  className="relative w-8 h-8 rounded-full grid place-items-center hover:opacity-90 active:scale-95 transition"
+  title={`GAIN ${addRemainMs > 0 ? `in ${addRemainLabel}` : "ready"}`}
+  aria-label="GAIN info"
+>
+  {/* טבעת ספירה בדיוק כמו 🎁/🦊 */}
+  <div className="absolute inset-0 rounded-full" style={ringBg(addProgress)} />
+  {/* האייקון עצמו */}
+  <div className="text-[20px] font-extrabold leading-none">▶️</div>
+</button>
+{/* === END GAIN button === */}
+
+
+
+            </div>
+          </div>
+
+          {/* Actions row */}
+          <div className="flex gap-2 mt-2 flex-wrap justify-center text-sm">
+
+          {/* ADD (spawn) — שורה 1: + [אייקון] (LV N) ; שורה 2: מחיר בלבד */}
+<button
+  onClick={addMiner}
+  disabled={!canBuyMiner}
+  className={`${BTN_BASE} ${BTN_H_FIX} ${BTN_W_FIX} ${
+    canBuyMiner
+      ? "bg-emerald-500 hover:bg-emerald-400 ring-emerald-300 text-slate-900"
+      : `bg-emerald-500 ring-emerald-300 text-slate-900 ${BTN_DIS}`
+  }`}
+>
+<div className="flex flex-col items-center justify-center leading-tight">
+  {/* שורה ראשונה */}
+  <div className="flex items-center gap-1">
+    {/* האייקון קודם */}
+   <span
+  className="relative inline-grid place-items-center"
+  style={{
+    width: UI_SPAWN_ICON_BOX * 2.0,
+    height: UI_SPAWN_ICON_BOX * 1.0,
+    marginLeft: -8,            // <<< הזזה שמאלה ~8px
+  }}
+>
+
+      <img
+        src={IMG_SPAWN_ICON}
+        alt="dog"
+        className="pointer-events-none object-cover block"
+        style={{
+          width: "100%",
+          height: "100%",
+          transform: `scale(${((typeof window!=="undefined" && window.SPAWN_ICON_ZOOM) || UI_SPAWN_ICON_ZOOM)}) translateY(${((typeof window!=="undefined" && window.SPAWN_ICON_SHIFT_Y) || UI_SPAWN_ICON_SHIFT_Y)}px)`,
+          transformOrigin: "center",
+        }}
+      />
+    </span>
+
+    {/* ואז סימן הפלוס */}
+    <span className="font-extrabold">+</span>
+
+    <b className="tracking-tight">(LV {stateRef.current?.spawnLevel || 1})</b>
+  </div>
+
+{/* שורה שנייה – רק המחיר, ממוקם בקצה הימני */}
+<div className="!text-[14px] md:!text-[16px] mt-0.5 tabular-nums font-extrabold leading-tight self-end mr-1">
+  {formatShort(spawnCostNow)}
+</div>
+
+
+</div>
+
+</button>
+
+{/* DPS — שורה 1: 🪓 +10% ; שורה 2: מחיר בלבד */}
+<button
+  onClick={upgradeDps}
+  disabled={!canBuyDps}
+  className={`${BTN_BASE} ${BTN_H_FIX} ${BTN_W_FIX} ${
+    canBuyDps
+? "bg-sky-500 hover:bg-sky-400 ring-sky-300 text-slate-900"
+      : `bg-sky-500 ring-sky-300 text-slate-900 ${BTN_DIS}`
+  }`}
+>
+  <div className="flex flex-col items-center justify-center leading-tight">
+    <div className="flex items-center gap-1">
+      <span>🪓</span>
+      <span>+10%</span>
+    </div>
+    <div className="!text-[14px] md:!text-[16px] mt-0.5 tabular-nums font-extrabold leading-tight">
+  {formatShort(dpsCostNow)}
+</div>
+
+  </div>
+</button>
+
+{/* GOLD — שורה 1: 🟡 +10% ; שורה 2: מחיר בלבד */}
+<button
+  onClick={upgradeGold}
+  disabled={!canBuyGold}
+  className={`${BTN_BASE} ${BTN_H_FIX} ${BTN_W_FIX} ${
+    canBuyGold
+       ? "bg-amber-400 hover:bg-amber-300 ring-amber-300 text-slate-900"
+      : `bg-amber-400 ring-amber-300 text-slate-900 ${BTN_DIS}`
+  }`}
+>
+  <div className="flex flex-col items-center justify-center leading-tight">
+    <div className="flex items-center gap-1">
+      <img
+  src="/images/silver.png"
+  alt="Lio"
+  className="w-5 h-5 inline-block"
+/>
+
+      <span>+10%</span>
+    </div>
+    <div className="!text-[14px] md:!text-[16px] mt-0.5 tabular-nums font-extrabold leading-tight">
+  {formatShort(goldCostNow)}
+
+</div>
+
+  </div>
+</button>
+
+
+                </div>
+
+          {/* Mining status + CLAIM */}
+          <div className="w-full flex justify-center mt-1">
+            <div className="flex items-center gap-2 px-2 py-1.5 text-xs">
+              {/* Icon button */}
+              {/* MLEO (icon + number) — both clickable */}
+<button
+  onClick={() => setShowMleoModal(true)}
+  className={`relative inline-flex items-center gap-2 px-2 py-1 rounded-md transition
+    ${(mining?.balance || 0) > 0 ? "hover:bg-white/10 active:scale-95 cursor-pointer" : "opacity-90"}`}
+  aria-label="Open MLEO details"
+  title="Open MLEO details"
+>
+  <div className="relative w-6 h-6 rounded-full grid place-items-center">
+    {(mining?.balance || 0) > 0 && (
+      <span
+        aria-hidden
+        className="absolute -inset-px rounded-full"
+        style={{
+          animation: "glowPulse 1.2s infinite",
+          border: "2px solid rgba(250,204,21,.8)",
+          boxShadow: "0 0 10px rgba(250,204,21,.55), 0 0 20px rgba(250,204,21,.35)"
+        }}
+      />
+    )}
+    <img src={IMG_TOKEN} alt="MLEO" className="w-6 h-6 rounded-full pointer-events-none" />
+  </div>
+
+  <span
+    className={`text-yellow-300 font-extrabold tabular-nums ${
+      (mining?.balance || 0) > 0 ? "inline-block" : ""
+    }`}
+    style={(mining?.balance || 0) > 0 ? { animation: "nudge 1.8s ease-in-out infinite" } : undefined}
+  >
+    {formatMleoShort(mining?.balance || 0)} MLEO
+
+  </span>
+</button>
+
+
+              <button
+                onClick={onClaimMined}
+                disabled={claiming || (mining?.balance || 0) <= 0}
+                className={`relative px-2.5 py-1 rounded-md font-extrabold transition active:scale-95
+                  ${(mining?.balance || 0) > 0 && !claiming
+                    ? "bg-yellow-400 hover:bg-yellow-300 text-black cursor-pointer"
+                    : "bg-slate-500 text-white/70 cursor-not-allowed"
+                  }`}
+                title={(mining?.balance || 0) > 0 ? "Claim" : "No tokens to claim"}
+              >
+                {(mining?.balance || 0) > 0 && !claiming && (
+                  <span
+                    aria-hidden
+                    className="absolute -inset-1 rounded-lg"
+                    style={{ animation: "btnPulse 1.8s ease-in-out infinite" }}
+                  />
+                )}
+                CLAIM
+              </button>
+
+              {/* VAULT */}
+              <button
+                onClick={() => setShowMiningInfo(true)}
+                className="ml-2 text-gray-300 hover:text-white underline-offset-2 hover:underline"
+                title="Open Mining"
+              >
+Vault: <b className="text-cyan-300 tabular-nums">
+  {formatMleoVault(mining?.vault || 0)}
+</b> MLEO
+
+
+              </button>
+            </div>
+          </div>
+
+        </div>
+
+        {/* === END PART 9 === */}
+
+
+{/* === START PART 10 === */}
+        {/* Toast ממורכז ומעל ה-HUD */}
+        {giftToast && (
+          <div className="fixed inset-0 z-[10002] flex items-center justify-center pointer-events-none">
+            <div className="pointer-events-auto px-6 py-4 rounded-2xl font-extrabold text-black shadow-2xl bg-gradient-to-br from-yellow-300 to-amber-400 border border-yellow-200 text-center animate-[popfade_1.8s_ease-out_forwards]">
+              {giftToast.text}
+            </div>
+            <style jsx global>{`
+              @keyframes popfade {
+                0% { opacity: 0; transform: translateY(6px) scale(0.96); }
+                15% { opacity: 1; transform: translateY(0) scale(1); }
+                75% { opacity: 1; }
+                100% { opacity: 0; transform: translateY(-6px) scale(0.98); }
+              }
+            `}</style>
+          </div>
         )}
 
-        {/* Reset confirm */}
-        {showResetConfirm && (
+        {/* פופאפ מרכזי – בלי OK, נעלם אוטומטית */}
+        {centerPopup && (
+          <div className="absolute inset-0 z-[10001] flex items-center justify-center pointer-events-none">
+            <div className="pointer-events-auto px-6 py-4 rounded-2xl font-extrabold text-black shadow-2xl bg-gradient-to-br from-yellow-300 to-amber-400 border border-yellow-200 text-center animate-[popfade_1.8s_ease-out_forwards]">
+              <div className="text-lg">{centerPopup.text}</div>
+            </div>
+            <style jsx global>{`
+              @keyframes popfade {
+                0% { opacity: 0; transform: translateY(6px) scale(0.96); }
+                15% { opacity: 1; transform: translateY(0) scale(1); }
+                75% { opacity: 1; }
+                100% { opacity: 0; transform: translateY(-6px) scale(0.98); }
+              }
+            `}</style>
+          </div>
+        )}
+
+        {/* Center Gift Button */}
+        {!showIntro && !gamePaused && !showCollect && (stateRef.current?.giftReady) && (
+          <div className="absolute inset-0 z-[8] flex items-center justify-center pointer-events-none">
+            <button
+              onClick={grantGift}
+              className="pointer-events-auto px-5 py-3 rounded-2xl font-extrabold text-black shadow-2xl bg-gradient-to-br from-yellow-300 to-amber-400 border border-yellow-200 hover:from-yellow-200 hover:to-amber-300 active:scale-95 relative"
+            >
+              🎁 Claim Gift
+              <span className="absolute -inset-2 rounded-3xl blur-3xl bg-yellow-400/30 -z-10" />
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Offline COLLECT — דרך פורטל */}
+<PortalModal open={showCollect} z={10010}>
+  <div className="fixed inset-0 z-[10010] flex items-center justify-center bg-black/85 px-6 text-center">
+    <div className="bg-white/10 backdrop-blur rounded-2xl p-6 border border-white/20 shadow-2xl max-w-sm w-full">
+      <div className="flex items-center justify-center gap-2 mb-3">
+        <img src={IMG_COIN} alt="coin" className="w-6 h-6" />
+        <h3 className="text-xl font-extrabold text-white">While you were away…</h3>
+      </div>
+      <p className="text-gray-200 mb-4">
+        Earned{" "}
+        <b className="text-yellow-300">{formatShort(stateRef.current?.pendingOfflineGold || 0)}</b>{" "}
+        coins and{" "}
+        <b className="text-yellow-300">{formatMleoShort(stateRef.current?.pendingOfflineMleo || 0)}</b>{" "}
+        MLEO
+      </p>
+      <button
+        onClick={onOfflineCollect}
+        onTouchStart={() => {}}
+        className="mx-auto px-6 py-3 rounded-xl bg-yellow-400 text-black font-extrabold text-lg shadow active:scale-95"
+      >
+        COLLECT
+      </button>
+    </div>
+  </div>
+</PortalModal>
+
+    {/* Reset confirm — דרך פורטל */}
+<PortalModal open={showResetConfirm} z={10030}>
+  <div className="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-[10030]">
+    <div className="bg-white text-slate-900 max-w-md w-full rounded-2xl p-6 shadow-2xl">
+      <h2 className="text-2xl font-extrabולד mb-2">Reset Progress?</h2>
+      <p className="text-sm text-slate-700 mb-4">
+        This will permanently delete your save and send you back to the start.
+      </p>
+      <div className="flex items-center justify-end gap-2">
+        <button
+          onClick={() => setShowResetConfirm(false)}
+          onTouchStart={() => {}}
+          className="px-4 py-2 rounded-lg bg-slate-200 hover:bg-slate-300 text-slate-900 font-semibold"
+        >
+          Cancel
+        </button>
+        <button
+          onClick={resetGame}
+          onTouchStart={() => {}}
+          className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-extrabold"
+        >
+          Yes, reset
+        </button>
+      </div>
+    </div>
+  </div>
+</PortalModal>
+
+      {/* How to Play — דרך פורטל */}
+<PortalModal open={showHowTo} z={10020}>
+  <div className="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-[10020]">
+    <div className="bg-white text-slate-900 max-w-md w-full rounded-2xl p-6 shadow-2xl overflow-auto max-h-[85vh]">
+      <h2 className="text-2xl font-extrabold mb-3">How to Play</h2>
+
+            <div className="space-y-4 text-sm text-slate-700">
+              <section>
+                <h3 className="font-bold text-slate-900 mb-1">Goal</h3>
+                <p>
+                  Merge dogs (miners), break rocks, and earn <b>Coins</b>. Coins are an in-game
+                  resource used for upgrades and buying more miners. Some activity in the
+                  game can also accrue <b>MLEO</b> (see “Mining &amp; Tokens” below).
+                </p>
+              </section>
+
+              <section>
+                <h3 className="font-bold text-slate-900 mb-1">Board &amp; Merging</h3>
+                <ol className="list-decimal ml-5 space-y-1">
+                  <li>Tap <b>ADD</b> on an empty slot to place a dog. Cost rises over time.</li>
+                  <li>Drag two dogs of the same level together to merge into a higher level.</li>
+                  <li>Each dog adds damage per second (DPS) to its lane. When a rock breaks you receive Coins.</li>
+                </ol>
+              </section>
+
+              <section>
+                <h3 className="font-bold text-slate-900 mb-1">Upgrades &amp; Bonuses</h3>
+                <ul className="list-disc ml-5 space-y-1">
+                  <li><b>DPS</b> upgrades make rocks break faster.</li>
+                  <li><b>GOLD</b> upgrades increase the Coins you receive from each rock by 10% per upgrade.</li>
+                  <li>Gifts, auto-dogs and other bonuses may appear from time to time. Exact timings, drop types and balance values are dynamic and may change without notice.</li>
+                  <li>Diamonds can be collected and spent for special rewards. Availability and rewards are not guaranteed.</li>
+                </ul>
+              </section>
+
+              <section>
+                <h3 className="font-bold text-slate-900 mb-1">Mining &amp; Tokens (MLEO)</h3>
+                <ul className="list-disc ml-5 space-y-1">
+                  <li><b>How MLEO is accrued:</b> Only breaking rocks can generate MLEO. A portion of the Coins you earn from rock breaks may convert into MLEO at a variable rate that is subject to in-game balancing, daily limits and anti-abuse protections.</li>
+                  <li><b>Daily limits &amp; tapering:</b> To keep things fair, daily accrual may taper as you approach your personal limit for the day. Limits and calculations are internal and can change.</li>
+                  <li><b>Offline progress:</b> Limited offline progress is simulated at a reduced efficiency compared to active play. Exact values are internal and may change.</li>
+                  <li><b>CLAIM:</b> Your accrued MLEO appears as a balance. Claiming moves it into your in-game <b>Vault</b>. If/when on-chain claims become available, additional unlock windows and restrictions may apply.</li>
+                  <li><b>No value promise:</b> MLEO in this game is a <u>utility token for entertainment</u>. It has no intrinsic or guaranteed monetary value. Nothing here is an offer, solicitation, or promise of future value.</li>
+                </ul>
+              </section>
+
+              <section>
+                <h3 className="font-bold text-slate-900 mb-1">Good to Know</h3>
+                <ul className="list-disc ml-5 space-y-1">
+                  <li>Game balance, drop rates, limits and schedules are dynamic and may be changed, paused or reset at any time for stability, fairness or maintenance.</li>
+                  <li>Progress may be adjusted to address bugs, exploits or abuse.</li>
+                  <li>This is a casual game for fun. It is not financial advice and not an investment product.</li>
+                </ul>
+              </section>
+            </div>
+
+          <div className="flex justify-end gap-2 mt-4">
+        <button
+          onClick={() => setShowHowTo(false)}
+          onTouchStart={() => {}}
+          className="px-4 py-2 rounded-lg bg-slate-900 text-white hover:bg-slate-800"
+        >
+          Close
+        </button>
+      </div>
+    </div>
+  </div>
+</PortalModal>
+
+      {/* Terms — דרך פורטל */}
+<PortalModal open={showTerms} z={10020}>
+  <div className="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-[10020]">
+    <div className="bg-white text-slate-900 max-w-md w-full rounded-2xl p-6 shadow-2xl overflow-auto max-h-[85vh]">
+      <div className="flex items-center justify-between mb-2">
+        <h2 className="text-2xl font-extrabold">Terms &amp; Conditions</h2>
+        <button
+          onClick={() => setShowTerms(false)}
+          onTouchStart={() => {}}
+          className="px-3 py-1 rounded-lg bg-slate-900 text-white hover:bg-slate-800 text-sm font-extrabold"
+        >
+          Close
+        </button>
+      </div>
+
+           <div className="text-sm text-slate-700 space-y-4 text-left">
+  <section>
+    <h3 className="font-bold text-slate-900 mb-1">1) Acceptance of Terms</h3>
+    <p>By accessing or using the game, you agree to these Terms &amp; Conditions (“Terms”). We may update them in-app; continued use is acceptance.</p>
+  </section>
+
+  <section>
+    <h3 className="font-bold text-slate-900 mb-1">2) Entertainment-Only; No Monetary Value</h3>
+    <p>Coins and “MLEO” are utility features for gameplay. They are not money, securities, or financial instruments, and carry no promise of price, liquidity, profit or future value.</p>
+  </section>
+
+  <section>
+    <h3 className="font-bold text-slate-900 mb-1">3) No Financial Advice</h3>
+    <p>Nothing here is investment, legal, accounting or tax advice. You are solely responsible for your decisions.</p>
+  </section>
+
+  <section>
+    <h3 className="font-bold text-slate-900 mb-1">4) Gameplay, Balancing &amp; Progress</h3>
+    <ul className="list-disc ml-5 space-y-1">
+      <li>Rates/limits/drop tables/schedules/offline behavior are internal and may change, pause or reset at any time.</li>
+      <li>We may adjust/rollback progress to address bugs, exploits or irregular activity.</li>
+      <li>Feature availability may depend on time, region, device or account status.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h3 className="font-bold text-slate-900 mb-1">5) Mining, Vault &amp; Claims</h3>
+    <ul className="list-disc ml-5 space-y-1">
+      <li>Only certain actions (e.g., breaking rocks) may accrue MLEO under variable, capped rules.</li>
+      <li>“CLAIM” moves accrued MLEO to your in-game <b>Vault</b>. If on-chain claims open later, they may be subject to unlock windows, rate limits, eligibility checks and other restrictions.</li>
+      <li>We may change, delay or discontinue vaulting and/or on-chain claiming at any time.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h3 className="font-bold text-slate-900 mb-1">6) Wallets &amp; Third-Party Services</h3>
+    <ul className="list-disc ml-5 space-y-1">
+      <li>Wallet connection is optional and via third parties outside our control. Keep your devices, keys and wallets secure.</li>
+      <li>Blockchain transactions are irreversible and may incur network fees. We are not responsible for losses due to user error, phishing, gas volatility, forks/reorgs, downtime or smart-contract risks.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h3 className="font-bold text-slate-900 mb-1">7) Fair Play &amp; Prohibited Conduct</h3>
+    <ul className="list-disc ml-5 space-y-1">
+      <li>No bots, automation, multi-account abuse, exploits, reverse engineering or service interference.</li>
+      <li>We may suspend, reset or terminate access and remove balances obtained through prohibited behavior.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h3 className="font-bold text-slate-900 mb-1">8) Availability, Data &amp; Updates</h3>
+    <ul className="list-disc ml-5 space-y-1">
+      <li>Service may be unavailable, interrupted or updated at any time.</li>
+      <li>We may modify/discontinue features, wipe test data or migrate saves.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h3 className="font-bold text-slate-900 mb-1">9) Airdrops, Promotions &amp; Rewards</h3>
+    <p>Any events or rewards are discretionary, may change, and can have eligibility requirements. Participation does not guarantee receipt or value.</p>
+  </section>
+
+  <section>
+    <h3 className="font-bold text-slate-900 mb-1">10) Taxes</h3>
+    <p>You are solely responsible for any taxes related to your use of the game and any rewards you may receive.</p>
+  </section>
+
+  <section>
+    <h3 className="font-bold text-slate-900 mb-1">11) Limitation of Liability</h3>
+    <p>To the maximum extent permitted by law, we are not liable for indirect/special/consequential damages or loss of data/tokens/profits/opportunities.</p>
+  </section>
+
+  <section>
+    <h3 className="font-bold text-slate-900 mb-1">12) Indemnity</h3>
+    <p>You agree to indemnify and hold us harmless from claims or expenses arising from your use of the game or violation of these Terms.</p>
+  </section>
+
+  <section>
+    <h3 className="font-bold text-slate-900 mb-1">13) Governing Law &amp; Disputes</h3>
+    <p>These Terms are governed by the laws of <b>[insert jurisdiction]</b>. Disputes resolved exclusively in <b>[insert venue]</b>.</p>
+  </section>
+
+  <section>
+    <h3 className="font-bold text-slate-900 mb-1">14) Contact</h3>
+    <p>Questions? <b>[insert contact email]</b>.</p>
+  </section>
+</div>
+
+
+            <div className="flex justify-end gap-2 mt-4">
+              <button
+                onClick={() => {
+                  acceptTerms();
+                  setFirstTimeNeedsTerms(false);
+                  setShowTerms(false);
+                }}
+                className="px-4 py-2 rounded-lg bg-green-600 text-white hover:bg-green-500 font-bold"
+              >
+                I Agree
+              </button>
+            </div>
+       </div>
+  </div>
+</PortalModal>
+
+      {/* HUD Info modal (Coins/DPS/GOLD/Spawn/Gifts/🎁/🦊) */}
+      {hudModal && (
+        <div className="fixed inset-0 z-[10000] bg-black/80 flex items-center justify-center p-4">
+          <div className="bg-white text-slate-900 max-w-sm w-full rounded-2xl p-6 shadow-2xl overflow-auto max-h-[85vh]">
+            <h2 className="text-xl font-extrabold mb-2">{getHudModalTitle(hudModal)}</h2>
+            <p className="text-sm text-slate-700 whitespace-pre-line">
+              {getHudModalText(hudModal)}
+            </p>
+            <div className="flex justify-end mt-4">
+              <button
+                onClick={() => setHudModal(null)}
+                className="px-4 py-2 rounded-lg bg-slate-900 text-white hover:bg-slate-800 font-extrabold"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+{/* === [GAIN] Modal (ADD) === */}
+{showGainModal && (
+  <div className="fixed inset-0 z-[10060] bg-black/60 backdrop-blur-sm grid place-items-center p-4">
+    <div className="w-full max-w-md rounded-2xl bg-zinc-900 text-white border border-white/10 shadow-lg">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-white/10">
+        <h3 className="text-lg font-semibold">GAIN — How it works</h3>
+        <button
+          onClick={() => setShowGainModal(false)}
+          className="px-2 py-1 rounded hover:bg-white/10"
+          aria-label="Close"
+          title="Close"
+        >
+          ✕
+        </button>
+      </div>
+
+      <div className="px-4 py-4 space-y-3 text-sm leading-6">
+        <p>
+          GAIN is a special reward. Follow the steps to enable it and receive the bonus.
+        </p>
+
+        {/* Dynamic status bar */}
+        <div className="rounded-lg bg-black/40 border border-white/10 p-3">
+          <div className="flex items-center justify-between">
+            <span className="font-medium">Status</span>
+            <span className={`px-2 py-0.5 rounded text-xs ${!addDisabled ? "bg-green-500 text-black" : "bg-zinc-700 text-white/80"}`}>
+  {!addDisabled ? "Available" : "Not available"}
+</span>
+
+          </div>
+          <p className="mt-2 text-white/80">
+            {!addDisabled
+  ? "Your GAIN is ready. Press WATCH to proceed and claim it."
+  : `GAIN will become available in ${addRemainLabel}.`}
+
+          </p>
+        </div>
+
+        {/* Instructions — replace copy with your exact flow */}
+        <ul className="list-disc list-inside space-y-1 text-white/80">
+          <li>Complete the required action to enable GAIN.</li>
+          <li>When ready, press WATCH to activate it and receive the reward.</li>
+          <li>If disabled, please wait until conditions are met.</li>
+        </ul>
+      </div>
+
+      <div className="px-4 pb-4 flex items-center justify-between gap-3">
+        <button
+          onClick={() => setShowGainModal(false)}
+          className="px-4 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 border border-white/10"
+        >
+          Close
+        </button>
+
+<button
+  onClick={() => {
+    if (addDisabled) return;   // עדיין בהמתנה
+    setShowGainModal(false);   // סגור את מודאל ההסבר
+    onAdd();                   // 👈 אותו אקשן שהיה על כפתור GAIN הישן
+  }}
+  disabled={addDisabled}
+  className={`px-4 py-2 rounded-lg font-semibold border ${
+    !addDisabled
+      ? "bg-emerald-500 text-black border-emerald-400"
+      : "bg-zinc-700 text-white/50 border-white/10 cursor-not-allowed"
+  }`}
+  title={!addDisabled ? "Watch and claim" : "Not available yet"}
+>
+  {!addDisabled ? "WATCH" : "WATCH (disabled)"}
+</button>
+
+
+      </div>
+    </div>
+  </div>
+)}
+{/* === [GAIN] END Modal === */}
+
+
+         {/* Diamonds modal */}
+      {showDiamondInfo && (() => {
+        const s = stateRef.current || {};
+        const diamonds = Number(s.diamonds || 0);
+
+        const prizeLabel = (() => {
+          switch (s.nextDiamondPrize) {
+            case "coins_x10":   return "10x gift";
+            case "coins_x100":  return "100x gift";
+            case "coins_x1000": return "1000x gift";
+            case "dog+3":       return "Dog +3 levels";
+            case "dog+5":       return "Dog +5 levels";
+            case "dog+7":       return "Dog +7 levels";
+            default:            return s.nextDiamondPrize || "";
+          }
+        })();
+
+        const ready = diamonds >= 3;
+
+        return (
           <div className="fixed inset-0 z-[10000] bg-black/80 flex items-center justify-center p-4">
-            <div className="bg-white text-slate-900 max-w-md w-full rounded-2xl p-6 shadow-2xl">
-              <h2 className="text-2xl font-extrabold mb-2">Reset Progress?</h2>
-              <p className="text-sm text-slate-700 mb-4">
-                This will permanently delete your save and send you back to the start.
+            <div className="bg-white text-slate-900 max-w-sm w-full rounded-2xl p-6 shadow-2xl overflow-auto max-h-[85vh]">
+              <h2 className="text-xl font-extrabold mb-1">Diamonds</h2>
+
+              <p className="text-xs text-slate-600 mb-3">
+                Collect <b>3</b> diamonds to open a chest. You can hold more than 3 and open rewards whenever you choose.
+                Possible rewards: <b>10x</b>/<b>100x</b>/<b>1000x</b> coin gifts or a <b>Dog</b> boost (+3/+5/+7 levels).
               </p>
 
-              <div className="flex items-center justify-end gap-2">
+              <div className="grid grid-cols-2 gap-2 text-sm mb-3">
+                <div className="p-3 rounded-xl bg-slate-100">
+                  <div className="text-slate-500 text-xs">Diamonds</div>
+                  <div className="font-extrabold text-slate-900">{diamonds} / 3</div>
+                </div>
+                <div className="p-3 rounded-xl bg-slate-100">
+                  <div className="text-slate-500 text-xs">Next Prize</div>
+                  <div className="font-extrabold text-slate-900">{prizeLabel}</div>
+                </div>
+              </div>
+
+              <div className="flex justify-between gap-2">
                 <button
-                  onClick={() => setShowResetConfirm(false)}
-                  className="px-4 py-2 rounded-lg bg-slate-200 hover:bg-slate-300 text-slate-900 font-semibold"
+                  onClick={() => setShowDiamondInfo(false)}
+                  className="px-4 py-2 rounded-lg bg-slate-200 hover:bg-slate-300 text-slate-900 font-extrabold"
                 >
-                  Cancel
+                  Close
                 </button>
                 <button
-                  onClick={resetGame}
-                  className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-extrabold"
+                  onClick={() => { openDiamondChestIfReady(); }}
+                  disabled={!ready}
+                  className={`px-4 py-2 rounded-lg font-extrabold ${ready ? "bg-yellow-400 hover:bg-yellow-300 text-black" : "bg-slate-300 text-slate-500 cursor-not-allowed"}`}
+                  title={ready ? "Open chest" : "Need 3 diamonds"}
                 >
-                  Yes, reset
+                  OPEN CHEST
                 </button>
               </div>
             </div>
           </div>
-        )}
+        );
+      })()}
 
-        {/* Diamond Rewards Modal */}
-        {showDiamondInfo && (
-          <div className="fixed inset-0 z-[9998] flex items-center justify-center bg-black/80 px-4">
-            <div className="bg-white/10 backdrop-blur rounded-2xl p-5 border border-white/20 shadow-2xl max-w-sm w-[92%] sm:w-[420px] text-left overflow-auto max-h-[85vh]">
-              <div className="flex items-center justify-between mb-3">
-                <div className="flex items-center gap-2">
-                  <span className="text-2xl">💎</span>
-                  <h3 className="text-lg font-extrabold text-white">Diamond Chest</h3>
+      {/* MLEO quick modal (נפתח מלחיצה על אייקון ה-MLEO ב-HUD) + כפתור CLAIM */}
+      {showMleoModal && (
+        <div className="fixed inset-0 z-[10000] bg-black/80 flex items-center justify-center p-4">
+          <div className="bg-white text-slate-900 max-w-sm w-full rounded-2xl p-6 shadow-2xl overflow-auto max-h-[85vh]">
+            <h2 className="text-xl font-extrabold mb-3">MLEO</h2>
+
+            <div className="grid grid-cols-2 gap-2 text-sm mb-3">
+              <div className="p-3 rounded-xl bg-slate-100">
+                <div className="text-slate-500 text-xs">Balance</div>
+                <div className="font-extrabold text-slate-900 tabular-nums">
+                  {formatMleo2(Number(mining?.balance || 0))} MLEO
                 </div>
+              </div>
+              <div className="p-3 rounded-xl bg-slate-100">
+                <div className="text-slate-500 text-xs">Mined Today</div>
+                <div className="font-extrabold text-slate-900 tabular-nums">
+                  {formatMleo2(Number(mining?.minedToday || 0))} / {formatShort(DAILY_CAP)}
+                </div>
+              </div>
+              <div className="p-3 rounded-xl bg-slate-100">
+                <div className="text-slate-500 text-xs">Vault</div>
+                <div className="font-extrabold text-slate-900 tabular-nums">
+                  {formatMleo2(Number(mining?.vault || 0))} MLEO
+                </div>
+              </div>
+              <div className="p-3 rounded-xl bg-slate-100">
+                <div className="text-slate-500 text-xs">Claimed (Total)</div>
+                <div className="font-extrabold text-slate-900 tabular-nums">
+                  {formatMleo2(Number(mining?.claimedTotal || 0))} MLEO
+                </div>
+              </div>
+            </div>
+
+            <div className="flex justify-between gap-2">
+              <button
+                onClick={() => setShowMleoModal(false)}
+                className="px-4 py-2 rounded-lg bg-slate-200 hover:bg-slate-300 text-slate-900 font-extrabold"
+              >
+                Close
+              </button>
+              <button
+                onClick={onClaimMined}
+                disabled={claiming || (Number(mining?.balance || 0) <= 0)}
+                className={`px-4 py-2 rounded-lg font-extrabold ${
+                  (Number(mining?.balance || 0) > 0) && !claiming
+                    ? "bg-yellow-400 hover:bg-yellow-300 text-black"
+                    : "bg-slate-300 text-slate-500 cursor-not-allowed"
+                }`}
+                title={(Number(mining?.balance || 0) > 0) ? "Claim" : "No tokens to claim"}
+              >
+                CLAIM
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+
+           {/* Mining modal (Wallet connect + Claim UI) */}
+      {showMiningInfo && (() => {
+        const vault   = Number(mining?.vault || 0);
+        const bal     = Number(mining?.balance || 0);
+        const mined   = Number(mining?.minedToday || 0);
+        const claimed = Number(mining?.claimedTotal || 0);
+
+        const pct100   = Math.round(currentClaimPct(Date.now()) * 100);
+        const canWallet = TOKEN_LIVE && walletClaimEnabled(Date.now());
+        const room      = remainingWalletClaimRoom();
+        const hasRoom   = room > 0;
+
+        return (
+          <div className="fixed inset-0 z-[10000] bg-black/80 flex items-center justify-center p-4">
+            <div className="bg-white text-slate-900 max-w-md w-full rounded-2xl p-6 shadow-2xl overflow-auto max-h-[85vh]">
+              <h2 className="text-2xl font-extrabold mb-1">Mining &amp; Tokens</h2>
+              <div className="text-xs text-slate-600 mb-4">Local demo accrual and vaulting.</div>
+
+              {/* Release bar + TGE countdown */}
+              <div className="mb-3">
+                <WalletReleaseBar />
+                <div className="flex items-center justify-between text-xs">
+                  <span>Unlock progress: <b>{pct100}%</b></span>
+                  <TgeCountdown />
+                </div>
+              </div>
+
+              {/* Stats */}
+              <div className="grid grid-cols-2 gap-2 mb-3 text-sm">
+                <div className="p-3 rounded-xl bg-slate-100">
+                  <div className="text-slate-500 text-xs">Balance</div>
+                  <div className="font-extrabold text-slate-900 tabular-nums">
+                    {formatMleo2(bal)} MLEO
+                  </div>
+                </div>
+                <div className="p-3 rounded-xl bg-slate-100">
+                  <div className="text-slate-500 text-xs">Mined Today</div>
+                  <div className="font-extrabold text-slate-900 tabular-nums">
+                    {formatMleo2(mined)} / {formatShort(DAILY_CAP)}
+                  </div>
+                </div>
+                <div className="p-3 rounded-xl bg-slate-100">
+                  <div className="text-slate-500 text-xs">Vault</div>
+                  <div className="font-extrabold text-slate-900 tabular-nums">
+                    {formatMleo2(vault)} MLEO
+                  </div>
+                </div>
+                <div className="p-3 rounded-xl bg-slate-100">
+                  <div className="text-slate-500 text-xs">Claimed (Total)</div>
+                  <div className="font-extrabold text-slate-900 tabular-nums">
+                    {formatMleo2(claimed)} MLEO
+                  </div>
+                </div>
+              </div>
+
+              {/* Wallet actions */}
+              <div className="mb-3 p-3 rounded-xl bg-slate-50 border border-slate-200">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <button
+                    onClick={() => {
+                      if (!isConnected) {
+                        openConnectModal?.();
+                      } else {
+                        // פותח חלון ארנק ואז מודיע "COMING SOON"
+                        openAccountModal?.();
+                        setGiftToastWithTTL("COMING SOON");
+                      }
+                    }}
+                    className={`px-3 py-1.5 rounded-lg font-extrabold text-xs active:scale-95 ${
+                      isConnected
+                        ? "bg-emerald-500 hover:bg-emerald-400 text-white"
+                        : "bg-indigo-500 hover:bg-indigo-400 text-white"
+                    }`}
+                  >
+                    {isConnected ? "WALLET" : "CONNECT WALLET"}
+                  </button>
+
+                  <button
+                    onClick={onClaimMined}
+                    disabled={
+                      claiming ||
+                      bal <= 0 ||
+                      (TOKEN_LIVE && (!canWallet || !hasRoom))
+                    }
+                    className={`px-3 py-1.5 rounded-lg font-extrabold text-xs active:scale-95 ${
+                      (!TOKEN_LIVE || (canWallet && hasRoom && bal > 0)) && !claiming
+                        ? "bg-yellow-400 hover:bg-yellow-300 text-black"
+                        : "bg-slate-300 text-slate-500 cursor-not-allowed"
+                    }`}
+                    title={
+                      !TOKEN_LIVE
+                        ? "Claim to Vault (demo)"
+                        : canWallet
+                          ? (hasRoom ? "Claim to Wallet" : "No wallet claim room yet")
+                          : "Wallet claim locked"
+                    }
+                  >
+                    {TOKEN_LIVE ? "CLAIM TO WALLET" : "CLAIM TO VAULT"}
+                  </button>
+                </div>
+
+                {TOKEN_LIVE && (
+                  <p className="text-[11px] text-slate-600 mt-2">
+                    Wallet claims unlock gradually after TGE.
+                    Available now: <b>{formatMleo(room)}</b> MLEO.
+                  </p>
+                )}
+              </div>
+
+              {/* Notes */}
+              <div className="text-xs text-slate-600 border-t pt-3">
+                <p>
+                  In demo mode, <b>CLAIM</b> moves your MLEO to the in-game <b>Vault</b>.
+                  When on-chain claims go live, this button will switch to wallet claiming
+                  with unlock rules.
+                </p>
+              </div>
+
+              <div className="flex justify-end gap-2 mt-4">
                 <button
-                  onClick={() => setShowDiamondInfo(false)}
-                  className="px-2 py-1 bg-yellow-400 text-black font-bold rounded-lg text-xs"
+                  onClick={() => setShowMiningInfo(false)}
+                  className="px-4 py-2 rounded-lg bg-slate-900 text-white hover:bg-slate-800 font-extrabold"
                 >
                   Close
                 </button>
               </div>
-
-              <p className="text-gray-200 mb-2 text-sm">
-                Diamonds: <b className="text-yellow-300">{stateRef.current?.diamonds ?? 0}</b>
-              </p>
-
-              <div className="rounded-lg p-3 bg-white/5 border border-white/10 mb-3 text-sm">
-                <div className="text-gray-100 mb-1 font-semibold">Next reward:</div>
-                <div className="text-gray-100">
-                  {DIAMOND_PRIZES.find(p => p.key === (stateRef.current?.nextDiamondPrize))?.label || "Mystery reward"}
-                </div>
-              </div>
-
-              <ul className="space-y-1 mb-4 text-sm">
-                {DIAMOND_PRIZES.map(p => {
-                  const isNext = (stateRef.current?.nextDiamondPrize === p.key);
-                  return (
-                    <li
-                      key={p.key}
-                      className={`flex items-center justify-between rounded-lg px-2 py-1
-                        ${isNext ? "bg-yellow-400/15 border border-yellow-400/60" : "bg-white/5 border border-white/10"}`}
-                    >
-                      <span className="text-gray-100">{p.label}</span>
-                      {isNext && <span className="text-[10px] font-extrabold text-yellow-300">NEXT</span>}
-                    </li>
-                  );
-                })}
-              </ul>
-
-              <div className="flex items-center justify-between">
-                <p className="text-gray-300 text-xs">
-                  Open when you have 3💎.
-                </p>
-                <button
-                  onClick={() => { openDiamondChestIfReady(); }}
-                  disabled={(stateRef.current?.diamonds || 0) < 3}
-                  className={`px-3 py-1.5 rounded-lg font-extrabold text-xs ${
-                    (stateRef.current?.diamonds || 0) >= 3
-                      ? "bg-yellow-400 hover:bg-yellow-300 text-black"
-                      : "bg-slate-400 text-slate-800 opacity-60 cursor-not-allowed"
-                  }`}
-                >
-                  OPEN (3💎)
-                </button>
-              </div>
             </div>
           </div>
-        )}
+        );
+      })()}
 
-        {!showIntro && (
-          <button
-            onClick={async () => { setShowIntro(true); setGamePaused(true); try { await exitFullscreenIfAny(); } catch {} }}
-            className="fixed top-3 right-3 px-4 py-2 bg-yellow-400 text-black font-bold rounded-lg text-sm z-[999]"
-          >
-            Exit
-          </button>
-        )}
-      </div>
-    </Layout>
-  );
+
+    </div>
+  </Layout>
+);
 }
-// === END PART 6 ===
+// === END PART 10 ===
