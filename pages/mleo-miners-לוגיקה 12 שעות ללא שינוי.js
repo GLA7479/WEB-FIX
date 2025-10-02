@@ -5,8 +5,7 @@
 import { useEffect, useRef, useState } from "react";
 import Layout from "../components/Layout";
 import { useConnectModal, useAccountModal } from "@rainbow-me/rainbowkit";
-import { useAccount, useDisconnect, useSwitchChain, useWriteContract, usePublicClient, useChainId } from "wagmi";
- import { parseUnits } from "viem";
+import { useAccount, useDisconnect } from "wagmi";
 import { useRouter } from "next/router";
 
 
@@ -49,9 +48,9 @@ const LANES = 4;
 const SLOTS_PER_LANE = 4;
 const MAX_MINERS = LANES * SLOTS_PER_LANE;
 const PADDING = 6;
-const LS_KEY = "mleoMiners_v5_84";
+const LS_KEY = "mleoMiners_v5_83_reset5";
 // First–play terms acceptance gate (global versioned)
-const TERMS_VERSION = "v1.5"; // ⬅️ bump to force re-accept if text changes
+const TERMS_VERSION = "v1.4"; // ⬅️ bump to force re-accept if text changes
 const TERMS_KEY = `mleoMiners_termsAccepted_${TERMS_VERSION}`;
 
 // Assets
@@ -67,34 +66,6 @@ const S_CLICK = "/sounds/click.mp3";
 const S_MERGE = "/sounds/merge.mp3";
 const S_ROCK  = "/sounds/rock.mp3";
 const S_GIFT  = "/sounds/gift.mp3";
-
-// ==== On-chain Claim (TBNB) config ====
-const CLAIM_CHAIN_ID = Number(process.env.NEXT_PUBLIC_CLAIM_CHAIN_ID || 97); // BSC Testnet
-
-// אין כתובת ברירת מחדל! חייבים לספק כתובת חדשה דרך ENV
-const CLAIM_ADDRESS = (process.env.NEXT_PUBLIC_MLEO_CLAIM_ADDRESS || process.env.NEXT_PUBLIC_CLAIM_ADDRESS || "").trim();
-const MLEO_DECIMALS  = Number(process.env.NEXT_PUBLIC_MLEO_DECIMALS || 18);
-const CLAIM_FN       = (process.env.NEXT_PUBLIC_MLEO_CLAIM_FN || "claim").toLowerCase();
-
-function isValidAddress(a){
-  return /^0x[0-9a-fA-F]{40}$/.test(a || "");
-}
-
-
-const CLAIM_ABI_MAP = {
-  claim:  [{ type:"function", name:"claim",  stateMutability:"nonpayable", inputs:[{name:"amount", type:"uint256"}], outputs:[] }],
-  mint:   [{ type:"function", name:"mint",   stateMutability:"nonpayable", inputs:[{name:"to", type:"address"}, {name:"amount", type:"uint256"}], outputs:[] }],
-  mintto: [{ type:"function", name:"mintTo", stateMutability:"nonpayable", inputs:[{name:"to", type:"address"}, {name:"amount", type:"uint256"}], outputs:[] }],
-};
-const GAME_ID = Number(process.env.NEXT_PUBLIC_GAME_ID || 1);
-
-
-// אפשר להפעיל עקיפה לטסטנט כדי להתעלם מגייטינג של TGE — רק במודל MINING
-const ALLOW_TESTNET_WALLET_FLAG =
-  (process.env.NEXT_PUBLIC_ALLOW_TESTNET_WALLET || "").toLowerCase() === "1" ||
-  (process.env.NEXT_PUBLIC_ALLOW_TESTNET_WALLET || "").toLowerCase() === "true";
-
-
 
 // ===== Debug helpers =====
  const DEBUG_LS = "MLEO_DEBUG_UI";
@@ -142,8 +113,8 @@ const BTN_H_FIX = `h-[${UI_ACTION_BTN_H_PX}px]`;
 const BASE_DPS = 2;
 const LEVEL_DPS_MUL = 1.9;
 const ROCK_BASE_HP = 60;
-const ROCK_HP_MUL = 1.4;
-const GOLD_FACTOR = 0.5;
+const ROCK_HP_MUL = 2.15;
+const GOLD_FACTOR = 0.12;
 
 // ===== Global gift phases (same for everyone) =====
 const GIFT_PHASES = [
@@ -222,27 +193,6 @@ function rollDiamondPrize() {
 
 // בסיס קיצורים (אלפים עד טריליון)
 const SUFFIXES_BASE = ["", "K", "M", "B", "T"];
-
-
-// קיצור עם ספרה אחת אחרי הנקודה (חיתוך, לא עיגול) — לשימוש HUD/כפתורים בלבד
-function formatAbbrevInt1(n) {
-  const sign = (n || 0) < 0 ? "-" : "";
-  const abs  = Math.abs(Number(n) || 0);
-  const p = 10; // ספרה אחת
-  if (abs < 1000) {
-    const t = Math.trunc(abs * p) / p;
-    return sign + t.toFixed(1);
-  }
-  let tier = Math.floor(Math.log10(abs) / 3);
-  let div  = Math.pow(1000, tier);
-  let val  = abs / div;
-  let trimmed = Math.trunc(val * p) / p;
-  if (trimmed >= 1000) { tier += 1; trimmed = 1; }
-  return sign + trimmed.toFixed(1) + suffixFromTier(tier);
-}
-const formatShort1 = formatAbbrevInt1;     // מטבעות/עלויות ב-HUD
-function formatMleoShort1(n){ return formatAbbrevInt1(n); } // MLEO ב-HUD
-
 
 // ממפה דרגת אלפים לסיומת: 0→"" , 1→K, 2→M, 3→B, 4→T, 5→AA, 6→AB, ... עד אינסוף
 function suffixFromTier(tier) {
@@ -324,71 +274,6 @@ function formatMleo2(n) {
   return sign + t.toFixed(2);
 }
 
-// === OFFLINE SESSION CLOCK (12h per session) ===
-const OFFLINE_SESSION_MAX_HOURS = 12;
-const OFFLINE_SESSION_MAX_MS = OFFLINE_SESSION_MAX_HOURS * 3600000;
-
-// Tiers (per session cumulated time)
-const OFFLINE_EFF_TIERS_SESSION = [
-  { upToHours: 2,  eff: 0.50 },
-  { upToHours: 6,  eff: 0.30 },
-  { upToHours: 12, eff: 0.10 },
-]; // >12h => 0
-
-function offlineSessionEffAt(consumedMs) {
-  const h = consumedMs / 3600000;
-  if (h < 2)  return 0.50;
-  if (h < 6)  return 0.30;
-  if (h < 12) return 0.10;
-  return 0;
-}
-function getOfflineSessionLeftMs(s) {
-  const used = Math.max(0, s.offlineConsumedMsInSession || 0);
-  return Math.max(0, OFFLINE_SESSION_MAX_MS - used);
-}
-function ensureOfflineSessionStart(s, now = Date.now()) {
-  if (!s.offlineSessionStartAt) s.offlineSessionStartAt = now;
-}
-function resetOfflineSession(s) {
-  s.offlineSessionStartAt = null;
-  s.offlineConsumedMsInSession = 0;
-}
-/** Consume elapsedMs from current session by tiered efficiency.
- * Returns { consumedMs, effectiveMs } and updates s.offlineConsumedMsInSession. */
-function takeFromOfflineSession(s, elapsedMs) {
-  if (!elapsedMs || elapsedMs <= 0) return { consumedMs: 0, effectiveMs: 0 };
-  const left = getOfflineSessionLeftMs(s);
-  if (left <= 0) return { consumedMs: 0, effectiveMs: 0 };
-
-  let toConsume = Math.min(left, elapsedMs);
-  let effectiveMs = 0, consumed = 0;
-  let usedSoFar   = s.offlineConsumedMsInSession || 0;
-
-  while (toConsume > 0) {
-    const eff = offlineSessionEffAt(usedSoFar);
-    if (eff <= 0) break;
-
-    let tierEndMs;
-    const h = usedSoFar / 3600000;
-    if (h < 2)       tierEndMs = 2  * 3600000;
-    else if (h < 6)  tierEndMs = 6  * 3600000;
-    else if (h < 12) tierEndMs = 12 * 3600000;
-    else break;
-
-    const roomInTier = Math.max(0, tierEndMs - usedSoFar);
-    const chunk = Math.min(toConsume, roomInTier);
-
-    effectiveMs += chunk * eff;
-    consumed    += chunk;
-    usedSoFar   += chunk;
-    toConsume   -= chunk;
-  }
-
-  s.offlineConsumedMsInSession = usedSoFar;
-  return { consumedMs: consumed, effectiveMs };
-}
-
-
 
 
 // ===== Simple image cache =====
@@ -408,11 +293,9 @@ const MINING_LS_KEY = "mleoMiningEconomy_v2.1";
 // —— Token & schedule (editable) ——
 const PRESALE_START_MS = null;               
 const PRESALE_DURATION_DAYS = 0;             
+const TGE_MS = null;                          
 
-// TGE: 2026-01-01 00:00:00Z
-const TGE_MS = Date.UTC(2024, 0, 1, 0, 0, 0);
-
-const TOKEN_LIVE = true;
+const TOKEN_LIVE = false; // דמו: כבוי. הפוך ל-true רק כשהחוזה וה-ABI מחוברים
 
 // Claim unlock schedule (מצטבר): חודש 1=10%, 2=30%, 3=50%, 4=70%, 5=90%, 6+=100%
 const CLAIM_SCHEDULE = [
@@ -424,7 +307,8 @@ const CLAIM_SCHEDULE = [
   { monthFromTGE: 6, pct: 1.00 },
 ];
 
-
+// —— Conversion & daily limit (editable) ——
+const MLEO_FROM_COINS_PCT = 0.01; // 1% from coins -> MLEO
 
 
 const SOFTCUT = [
@@ -480,104 +364,46 @@ function softcutFactor(minedToday, dailyCap){
   return 0.10;
 }
 
+// === REPLACE: previewMleoFromCoins / addPlayerScorePoints / finalizeDailyRewardOncePerTick ===
+const PREC = 2;
+const round3 = (x) => Number((x || 0).toFixed(PREC));
 
-// === MLEO Accrual Engine (inline) ===
-// נטען טבלת multipliers לפי הקובץ שהעברת (mleo-multipliers.json)
-const MLEO_TABLE = {
-  v1: 0.5,
-  blocks: [
-    { start: 1,   end: 10,   r: 1.6  },
-    { start: 11,  end: 20,   r: 1.4  },
-    { start: 21,  end: 30,   r: 1.3  },
-    { start: 31,  end: 40,   r: 1.1  },
-    { start: 41,  end: 50,   r: 1.05 },
-    { start: 51,  end: 100,  r: 1.001 },
-    { start: 101, end: 150,  r: 1.001 },
-    { start: 151, end: 200,  r: 1.001 },
-    { start: 201, end: 250,  r: 1.001 },
-    { start: 251, end: 300,  r: 1.001 },
-    { start: 301, end: 350,  r: 1.001 },
-    { start: 351, end: 400,  r: 1.001 },
-    { start: 401, end: 450,  r: 1.001 },
-    { start: 451, end: 500,  r: 1.001 },
-    { start: 501, end: 550,  r: 1.001 },
-    { start: 551, end: 600,  r: 1.001 },
-    { start: 601, end: 650,  r: 1.001 },
-    { start: 651, end: 700,  r: 1.001 },
-    { start: 701, end: 750,  r: 1.001 },
-    { start: 751, end: 800,  r: 1.001 },
-    { start: 801, end: 850,  r: 1.001 },
-    { start: 851, end: 900,  r: 1.001 },
-    { start: 901, end: 950,  r: 1.001 },
-    { start: 951, end: 1000, r: 1.001 },
-  ],
-};
-
-// === STAGE-BASED MLEO (per-rock stage; no global break counter) ===
-// stage 1 → v1
-// stage 2 → v1 * r(1)
-// stage n → v1 * Π_{i=1}^{n-1} r(i)   (r(i) נקבע לפי הבלוק בטבלה)
-const MLEO_STAGE_CACHE = { 1: MLEO_TABLE.v1 || 0.5 };
-
-// מחליף את engineRForStage (המנוע הישן הוסר)
-function stageRFor(stage){
-  const b = (MLEO_TABLE.blocks || []).find(b => stage >= b.start && stage <= b.end);
-  return b ? (b.r || 1) : 1.001;
+function previewMleoFromCoins(coins){
+  if (!coins || coins<=0) return 0;
+  const st = loadMiningState();
+  const base   = (coins * MLEO_FROM_COINS_PCT);
+  const factor = softcutFactor(st.minedToday||0, DAILY_CAP);
+  let eff = base * factor;
+  const room = Math.max(0, (DAILY_CAP - (st.minedToday||0)));
+  eff = Math.min(eff, room);
+  return round3(eff);
 }
 
-function mleoBaseForStage(stage) {
-  const s = Math.max(1, Math.floor(stage || 1));
-  if (MLEO_STAGE_CACHE[s] != null) return MLEO_STAGE_CACHE[s];
-  const prev = mleoBaseForStage(s - 1);
-  const r    = stageRFor(s - 1);         // הריישו של השלב הקודם
-  const val  = r6(prev * r);                   // חיתוך/עיגול קטן ליציבות
-  MLEO_STAGE_CACHE[s] = val;
-  return val;
-}
-
-function rockStageNow(rock) {
-  return ((rock?.idx ?? 0) + 1);               // idx מתחיל מ-0 ⇒ שלב = idx+1
-}
-
-
-const r6 = (x) => Math.round((x + Number.EPSILON) * 1e6) / 1e6;
-// === helpers (precision utils for mining math) ===
-const PREC_2 = 2;
-const round2 = (x) => Number((x || 0).toFixed(PREC_2));
-
-function addPlayerScorePoints(_s, baseMleo){
-  if(!baseMleo || baseMleo <= 0) return 0;
-
+function addPlayerScorePoints(_s, coinsFromRocks){
+  if(!coinsFromRocks || coinsFromRocks<=0) return;
   const st = loadMiningState();
   const today = getTodayKey();
   if(st.lastDay!==today){ st.minedToday=0; st.scoreToday=0; st.lastDay=today; }
 
-
   const factor = softcutFactor(st.minedToday||0, DAILY_CAP);
+  const baseMleo = (coinsFromRocks * MLEO_FROM_COINS_PCT);
   let eff = baseMleo * factor;
-
-  // הגבלת DAILY_CAP
   const room = Math.max(0, DAILY_CAP - (st.minedToday||0));
   eff = Math.min(eff, room);
 
-  eff = Number(eff.toFixed(2));
-
-  st.minedToday = Number(((st.minedToday||0) + eff).toFixed(2));
-  st.balance    = Number(((st.balance||0)    + eff).toFixed(2));
+  st.minedToday = round3((st.minedToday||0) + eff);
+  st.balance    = round3((st.balance||0)    + eff);
   saveMiningState(st);
-
-  return eff; // מחזיר כמה באמת נכנס כדי להציג ב־POP
 }
-
 
 function finalizeDailyRewardOncePerTick(){
   const st = loadMiningState();
   const today = getTodayKey();
   if(st.lastDay!==today) return;
   if((st.minedToday||0) > DAILY_CAP) {
-    const diff = round2((st.minedToday||0) - DAILY_CAP);
-    st.minedToday = round2(DAILY_CAP);
-    st.balance    = round2(Math.max(0, (st.balance||0) - diff));
+    const diff = round3((st.minedToday||0) - DAILY_CAP);
+    st.minedToday = round3(DAILY_CAP);
+    st.balance    = round3(Math.max(0, (st.balance||0) - diff));
     saveMiningState(st);
   }
 }
@@ -660,10 +486,6 @@ const router = useRouter();
   const { openConnectModal } = useConnectModal();
   const { openAccountModal } = useAccountModal();
   const { address, isConnected } = useAccount();
-const chainId = useChainId();
- const { switchChain } = useSwitchChain();
- const publicClient = usePublicClient();
- const { writeContractAsync } = useWriteContract();
 const { disconnect } = useDisconnect();
 
   const [ui, setUi] = useState({
@@ -867,202 +689,11 @@ const { disconnect } = useDisconnect();
     setMenuOpen(false);
   }
 
-// === MINING: CLAIM (איסוף כולל → לארנק) ===
-// חשוב: רק הכפתור בתוך מסך MINING עושה "איסוף כולל לארנק".
-// שני כפתורי CLAIM אחרים באפליקציה לא מושפעים.
-async function onClaimMined() {
-  try { play?.(S_CLICK); } catch {}
-
-  // 0) קודם לאסוף את ה-balance המקומי אל ה-Vault
-  try {
-    const st0 = loadMiningState();
-    const bal = Number((st0?.balance || 0).toFixed(2));
-    if (bal > 0) {
-      st0.vault        = Number(((st0.vault || 0) + bal).toFixed(2));
-      st0.claimedTotal = Number(((st0.claimedTotal || 0) + bal).toFixed(2));
-      st0.history      = Array.isArray(st0.history) ? st0.history : [];
-      st0.history.unshift({ ts: Date.now(), amt: bal, type: "to_vault" });
-      st0.balance = 0;
-      saveMiningState(st0);
-      setMining(st0);
-    }
-  } catch {}
-
-  // 1) מצב Vault כעת
-  const st = loadMiningState();
-  const vaultNow = Number((st?.vault || 0).toFixed(2));
-  if (!vaultNow) { setGiftToastWithTTL("Vault is empty"); return; }
-
-  // 2) חיבור + רשת
-  if (!isConnected) { openConnectModal?.(); return; }
-  if (chainId !== CLAIM_CHAIN_ID) {
-    try { await switchChain?.({ chainId: CLAIM_CHAIN_ID }); }
-    catch { setGiftToastWithTTL("Switch to BSC Testnet (TBNB)"); return; }
-  }
-
-  // 3) בדיקת כתובת חוזה – חובה ENV תקין
-  if (!isValidAddress(CLAIM_ADDRESS)) {
-    setGiftToastWithTTL("Missing/invalid CLAIM address (set NEXT_PUBLIC_MLEO_CLAIM_ADDRESS)");
+  // כפתור CLAIM — דמו: תמיד Vault
+  async function onClaimMined() {
+    claimBalanceToVaultDemo();
     return;
   }
-
-  // ABI מינימלי עבור claim(amount)
- const MINING_CLAIM_ABI = [
-  {
-    type: "function",
-    name: "claim",
-    stateMutability: "nonpayable",
-    inputs: [
-      { name: "gameId", type: "uint256" },
-      { name: "amount", type: "uint256" }
-    ],
-    outputs: []
-  }
-];
-
-
-  // 4) "הכול עכשיו": מושכים את כל ה-Vault לארנק
-  const toClaim = vaultNow;
-  setClaiming(true);
-  try {
-    const amountWei = parseUnits(
-      Number(toClaim).toFixed(Math.min(2, MLEO_DECIMALS)),
-      MLEO_DECIMALS
-    );
-
-    const hash = await writeContractAsync({
-      address: CLAIM_ADDRESS,
-      abi: MINING_CLAIM_ABI,
-      functionName: "claim",
-      args: [BigInt(GAME_ID), amountWei],
-
-      chainId: CLAIM_CHAIN_ID,
-      account: address,
-    });
-
-    await publicClient.waitForTransactionReceipt({ hash });
-
-    // 5) עדכון לוקאלי לאחר המשיכה
-    const after = loadMiningState();
-    const delta = Number(toClaim);
-    after.vault           = Math.max(0, Number(((after.vault || 0) - delta).toFixed(2)));
-    after.claimedToWallet = Number(((after.claimedToWallet || 0) + delta).toFixed(2));
-    after.history = Array.isArray(after.history) ? after.history : [];
-    after.history.unshift({ t: Date.now(), kind: "claim_wallet_all", amount: delta, tx: String(hash) });
-    saveMiningState(after);
-    setMining(after);
-    setCenterPopup?.({ text: `✅ Sent ${formatMleoShort(delta)} MLEO to wallet`, id: Math.random() });
-  } catch (err) {
-    console.error(err);
-    setGiftToastWithTTL("Claim failed or rejected");
-  } finally {
-    setClaiming(false);
-  }
-}
-
-
-async function onClaimMinedToWallet() {
-  try { play?.(S_CLICK); } catch {}
-  const st = loadMiningState();
-
-  // מושכים מה-Vault, לא מה-Balance
-  const vaultNow = Number((st?.vault || 0).toFixed(6));
-  if (!vaultNow) { setGiftToastWithTTL("Vault is empty"); return; }
-
-  if (!isConnected) { openConnectModal?.(); return; }
-
-  // להבטיח רשת TBNB
-  if (chainId !== CLAIM_CHAIN_ID) {
-    try { await switchChain?.({ chainId: CLAIM_CHAIN_ID }); }
-    catch { setGiftToastWithTTL("Switch to BSC Testnet (TBNB)"); return; }
-    // אל תחזור אוטומטית; אם המשתמש חזר לאפליקציה על אותה רשת – נמשיך.
-  }
-
-  if (!CLAIM_ADDRESS) { setGiftToastWithTTL("Missing CLAIM address"); return; }
-
-  // חישוב כמה מותר למשוך:
-  const testnetOverride = (ALLOW_TESTNET_WALLET_FLAG && chainId === CLAIM_CHAIN_ID);
-  const room = testnetOverride ? vaultNow : Math.max(0, remainingWalletClaimRoom());
-  const toClaim = Math.min(vaultNow, Number(room.toFixed ? room.toFixed(6) : room));
-
-  if (!toClaim) {
-    setGiftToastWithTTL(testnetOverride ? "Nothing to claim" : "Wallet claim locked");
-    return;
-  }
-
-  setClaiming(true);
-  try {
-    const amountWei = parseUnits(
-      Number(toClaim).toFixed(Math.min(6, MLEO_DECIMALS)),
-      MLEO_DECIMALS
-    );
-    const fn   = CLAIM_FN === "mintto" ? "mintTo" : CLAIM_FN;
-    const args = (fn === "claim") ? [amountWei] : [address, amountWei];
-    const abi  = (fn === "claim")
-      ? [{ type:"function", name:"claim",  stateMutability:"nonpayable", inputs:[{name:"amount", type:"uint256"}], outputs:[] }]
-      : [{ type:"function", name:"mintTo", stateMutability:"nonpayable", inputs:[{name:"to", type:"address"}, {name:"amount", type:"uint256"}], outputs:[] }];
-
-    // simulate (חשוב במובייל)
-    await publicClient.simulateContract({
-      address: CLAIM_ADDRESS,
-      abi,
-      functionName: fn,
-      args,
-      account: address,
-    });
-
-    // שליחה
-    const hash = await writeContractAsync({
-      address: CLAIM_ADDRESS,
-      abi,
-      functionName: fn,
-      args,
-      chainId: CLAIM_CHAIN_ID,
-    });
-
-    // פידבק מידי + עדכון אופטימי כדי למנוע כפילויות
-    const afterSend = loadMiningState();
-    const delta = Number(toClaim);
-    afterSend.vault           = Math.max(0, Number(((afterSend.vault || 0) - delta).toFixed(6)));
-    afterSend.claimedToWallet = Number(((afterSend.claimedToWallet || 0) + delta).toFixed(6));
-    afterSend.history         = Array.isArray(afterSend.history) ? afterSend.history : [];
-    afterSend.history.unshift({ t: Date.now(), kind: "claim_wallet_all_sent", amount: delta, tx: String(hash) });
-    afterSend.pendingWalletTx = String(hash);
-    afterSend.pendingWalletAmt = delta;
-    saveMiningState(afterSend);
-    setMining(afterSend);
-    setCenterPopup?.({ text: `⏳ Sent ${formatMleoShort(delta)} MLEO to wallet…`, id: Math.random() });
-
-    // אישור טרנזקציה
-    await publicClient.waitForTransactionReceipt({ hash });
-
-    // סימון הושלם + עדכון היסטוריה
-    const after = loadMiningState();
-    after.pendingWalletTx = null;
-    after.pendingWalletAmt = 0;
-    after.history = Array.isArray(after.history) ? after.history : [];
-    after.history.unshift({ t: Date.now(), kind: "claim_wallet_all_ok", amount: delta, tx: String(hash) });
-    saveMiningState(after);
-    setMining(after);
-    setCenterPopup?.({ text: `✅ Claimed ${formatMleoShort(delta)} MLEO to wallet`, id: Math.random() });
-  } catch (err) {
-    // רולבק אם צריך
-    try {
-      const st2 = loadMiningState();
-      if (st2?.pendingWalletAmt) {
-        st2.vault           = Number(((st2.vault || 0) + st2.pendingWalletAmt).toFixed(6));
-        st2.claimedToWallet = Math.max(0, Number(((st2.claimedToWallet || 0) - st2.pendingWalletAmt).toFixed(6)));
-        st2.history.unshift({ t: Date.now(), kind: "claim_wallet_all_rollback", amount: st2.pendingWalletAmt });
-        st2.pendingWalletTx = null; st2.pendingWalletAmt = 0;
-        saveMiningState(st2); setMining(st2);
-      }
-    } catch {}
-    console.error(err);
-    setGiftToastWithTTL("Claim failed or rejected");
-  } finally {
-    setClaiming(false);
-  }
-}
 
   // Debug live values (קיים אצלך — לא נוגע)
   const [debugVals, setDebugVals] = useState({
@@ -1146,14 +777,14 @@ async function onClaimMinedToWallet() {
 
     if (type === "coins20") {
       const base = Math.max(10, expectedGiftCoinReward(s));
-      const gain = Math.round(base * 0.10);
+      const gain = Math.round(base * 0.20);
       s.gold += gain;
       setUi(u => ({ ...u, gold: s.gold }));
       setCenterPopup({ text: `🎁 +${formatShort(gain)} coins`, id: Math.random() });
 
     } else if (type === "coins40") {
       const base = Math.max(10, expectedGiftCoinReward(s));
-      const gain = Math.round(base * 0.20);
+      const gain = Math.round(base * 0.40);
       s.gold += gain;
       setUi(u => ({ ...u, gold: s.gold }));
       setCenterPopup({ text: `🎁 +${formatShort(gain)} coins`, id: Math.random() });
@@ -1180,8 +811,6 @@ async function onClaimMinedToWallet() {
 
     s.giftFirstReadyAt = null;
     s.isIdleOffline = false;
-    resetOfflineSession(s);
-
 
     setGiftReadyFlag(false);
     try { play(S_GIFT); } catch {}
@@ -1241,7 +870,6 @@ async function onClaimMinedToWallet() {
 useEffect(() => {
   theStateFix_maybeMigrateLocalStorage();
 
-
   const loaded = loadSafe();
   const init = loaded ? { ...freshState(), ...loaded } : freshState();
 
@@ -1261,21 +889,18 @@ useEffect(() => {
   setGiftReadyFlag(!!init.giftReady);
 
   try {
-// ← החלף את הקטע הכפול בגרסה התקינה:
-const now = Date.now();
-if (!init.giftNextAt || Number.isNaN(init.giftNextAt)) {
-  init.giftReady  = false;
-  const stepSec = currentGiftIntervalSec(init, now);
-  init.giftNextAt = now + stepSec * 1000;
-  save();
-}
-if ((init.giftNextAt || 0) <= now) {
-  init.giftReady = true;
-  // העיקר: זמן אמיתי של ה־READY, לא now
-  init.giftFirstReadyAt = init.giftFirstReadyAt || init.giftNextAt;
-  setGiftReadyFlag(true);
-}
-
+    const now = Date.now();
+    if (!init.giftNextAt || Number.isNaN(init.giftNextAt)) {
+      init.giftReady  = false;
+      const stepSec = currentGiftIntervalSec(init, now);
+      init.giftNextAt = now + stepSec * 1000;
+      save();
+    }
+    if ((init.giftNextAt || 0) <= now) {
+      init.giftReady = true;
+      if (!init.giftFirstReadyAt) init.giftFirstReadyAt = now; // idle timer if already ready on load
+      setGiftReadyFlag(true);
+    }
   } catch {}
 
   try {
@@ -1291,19 +916,15 @@ if ((init.giftNextAt || 0) <= now) {
 
   try {
     const s = stateRef.current;
-     const now  = Date.now();
-  const last = s?.lastSeen || now;
-  const elapsedMs = Math.max(0, now - last);
-  if (elapsedMs > 1000) {
-    ensureOfflineSessionStart(s, last);
-    const gate = takeFromOfflineSession(s, elapsedMs);
-    const gained = gate.effectiveMs > 0 ? handleOfflineAccrual(s, gate.effectiveMs) : 0;
-    if (gained > 0) setShowCollect(true);
-    s.lastSeen = now;
-    resetOfflineSession(s); // חזרנו למשחק ⇒ איפוס הסשן
-    save();
-  }
-
+    const now  = Date.now();
+    const last = s?.lastSeen || now;
+    const elapsedMs = Math.max(0, now - last);
+    if (elapsedMs > 1000) {
+      const gained = handleOfflineAccrual(s, elapsedMs); // PART 6
+      if (gained > 0) setShowCollect(true);
+      s.lastSeen = now;
+      save();
+    }
   } catch {}
 
   setMounted(true);
@@ -1338,25 +959,19 @@ if ((init.giftNextAt || 0) <= now) {
 
   const onVisibility = () => {
     const s = stateRef.current; if (!s) return;
-    const now = Date.now();
     if (document.visibilityState === "hidden") {
-      s.lastSeen = now;
-      ensureOfflineSessionStart(s, now); // התחלת סשן
-      safeSave();
+      s.lastSeen = Date.now(); safeSave();
     } else {
+      const now = Date.now();
       const elapsedMs = Math.max(0, now - (s.lastSeen || now));
       if (elapsedMs > 1000) {
-        ensureOfflineSessionStart(s, s.lastSeen || now);
-        const gate = takeFromOfflineSession(s, elapsedMs);
-        const gained = gate.effectiveMs > 0 ? handleOfflineAccrual(s, gate.effectiveMs) : 0;
+        const gained = handleOfflineAccrual(s, elapsedMs); // PART 6
         if (gained > 0) setShowCollect(true);
         s.lastSeen = now;
-        resetOfflineSession(s); // חזרנו ⇒ איפוס הסשן
       }
       safeSave();
     }
   };
-
   const onHide = () => { const s = stateRef.current; if (s) { s.lastSeen = Date.now(); safeSave(); } };
   document.addEventListener("visibilitychange", onVisibility);
   window.addEventListener("pagehide", onHide);
@@ -1408,7 +1023,7 @@ useEffect(() => {
 // רנדר/סנכרון מתנות — 500ms heartbeat
 useEffect(() => {
   const id = setInterval(() => {
-    const s = stateRef.current;
+    const s = stateRef.current; 
     if (!s) return;
     const now = Date.now();
 
@@ -1422,8 +1037,7 @@ useEffect(() => {
 
     if (!s.giftReady && s.giftNextAt <= now) {
       s.giftReady = true;
-      // חשוב: לא מאבדים את זמן ה־ready האמיתי
-      s.giftFirstReadyAt = s.giftFirstReadyAt || s.giftNextAt;
+      if (!s.giftFirstReadyAt) s.giftFirstReadyAt = now; // start idle timer here
       setGiftReadyFlag(true);
       save();
     }
@@ -1469,10 +1083,6 @@ function freshState(){
     diamonds:0, nextDiamondPrize: rollDiamondPrize(),
     giftFirstReadyAt: null,       // first time current gift became ready
     isIdleOffline: false,         // force "offline-like" efficiency when idle
-    offlineSessionStartAt: null,
-    offlineConsumedMsInSession: 0,
-
-
 
     autoDogLastAt: now,
 autoDogNextAt: now + DOG_INTERVAL_SEC * 1000,
@@ -1952,24 +1562,18 @@ function tick(dt){
   const now = Date.now();
   if (s.paused){ s.lastSeen = now; return; }
 
-  // אם 🎁 מוכנה מעל 5 דק' ולא נלקחה — עוברים ל־idle-offline
-if (s.giftReady && (s.giftFirstReadyAt || s.giftNextAt)) {
-  const readySince = s.giftFirstReadyAt || s.giftNextAt;   // ← עוגן הזמן
-  if ((now - readySince) >= IDLE_OFFLINE_MS && !s.isIdleOffline) {
+// If a gift has been ready for over 5 minutes without being claimed, force idle-offline
+  if (s.giftReady && s.giftFirstReadyAt && (now - s.giftFirstReadyAt) >= IDLE_OFFLINE_MS) {
     s.isIdleOffline = true;
-    save?.();
   }
-}
 
-
-  // עדכון סלעים/מטבעות
-  for (let l = 0; l < LANES; l++){
+  for (let l=0; l<LANES; l++){
     let dps = 0;
-    for (let k = 0; k < SLOTS_PER_LANE; k++){
+    for (let k=0; k<SLOTS_PER_LANE; k++){
       const cell = s.lanes[l].slots[k]; if (!cell) continue;
-      const m = s.miners[cell.id];      if (!m) continue;
+      const m = s.miners[cell.id]; if (!m) continue;
       const onlineEff = s.isIdleOffline ? OFFLINE_DPS_FACTOR : 1;
-      dps += minerDps(m.level, (s.dpsMult||1)) * onlineEff;
+      dps += minerDps(m.level, s.dpsMult||1) * onlineEff;
     }
     const rock = s.lanes[l].rock;
     rock.hp -= dps * dt;
@@ -1980,25 +1584,12 @@ if (s.giftReady && (s.giftFirstReadyAt || s.giftNextAt)) {
         try { play?.(S_ROCK); } catch {}
       }
       const coinsGain = Math.floor(rock.maxHp * GOLD_FACTOR * (s.goldMult || 1));
-// נשמור מצב לפני – כדי לוודא POP לפי תוצאה אמיתית
-const before = loadMiningState();
-const balBefore = Number(before?.balance || 0);
+      const mleoGainPreview = previewMleoFromCoins(coinsGain);
 
-// GOLD כרגיל
-s.gold += coinsGain;
-setUi(u => ({ ...u, gold: s.gold }));
+      s.gold += coinsGain; setUi(u => ({ ...u, gold: s.gold }));
+      addPlayerScorePoints(s, coinsGain);
 
-// מעניקים MLEO לפי שלב הסלע עצמו (בלתי תלוי בסלעים אחרים)
-const stageNow = rockStageNow(rock);
-const baseForBreak = mleoBaseForStage(stageNow);
-const eff = addPlayerScorePoints(s, baseForBreak);finalizeDailyRewardOncePerTick();
-
-
-// מציגים ב־POP את מה שבאמת נכנס (eff), לא Preview
-const after = loadMiningState();
-const balAfter = Number(after?.balance || 0);
-const delta = Math.max(0, +(balAfter - balBefore).toFixed(2)); // גיבוי אם eff==null
-const mleoTxt = formatMleoShort(eff || delta || 0);
+const mleoTxt = formatMleoShort(mleoGainPreview || 0);
 setCenterPopup({ text: `⛏️ +${formatShort(coinsGain)} coins • +${mleoTxt} MLEO`, id: Math.random() });
 
 
@@ -2008,28 +1599,28 @@ setCenterPopup({ text: `⛏️ +${formatShort(coinsGain)} coins • +${mleoTxt} 
     }
   }
 
-  // עדכון טיימר מתנות
-  if (!s.giftReady && (s.giftNextAt || 0) <= now) {
-    s.giftReady = true;
-    setGiftReadyFlag(true);
+  if (!s.giftReady) {
+    if ((s.giftNextAt || 0) <= Date.now()) {
+      s.giftReady = true;
+      setGiftReadyFlag(true);
+    }
   }
 
-  // הנחת כלב יהלום ממתין
   if (s.pendingDiamondDogLevel && countMiners(s) < MAX_MINERS) {
     const placed = spawnMiner(s, s.pendingDiamondDogLevel);
     if (placed) {
       const placedLvl = s.pendingDiamondDogLevel;
       s.pendingDiamondDogLevel = null;
       s.giftReady  = false;
-      s.giftNextAt = now + currentGiftIntervalSec(s) * 1000;
+      s.giftNextAt = Date.now() + currentGiftIntervalSec(s) * 1000;
       setGiftToastWithTTL(`💎 Dog (LV ${placedLvl}) placed`);
       save?.();
     }
   }
 
-  // אוטו־דוג + חיתוך יומי ל-MLEO
   accrueBankDogsUpToNow(s);
   tryDistributeBankDog(s);
+
   finalizeDailyRewardOncePerTick();
   s.lastSeen = now;
 }
@@ -2074,9 +1665,6 @@ function save() {
       gold: s.gold, spawnCost: s.spawnCost, dpsMult: s.dpsMult, goldMult: s.goldMult,
       onceSpawned: s.onceSpawned,
 
-      offlineSessionStartAt: s.offlineSessionStartAt || null,
-      offlineConsumedMsInSession: s.offlineConsumedMsInSession || 0,
-
       minerScale: s.minerScale || 1.6,
       minerWidth: s.minerWidth || 0.8,
 
@@ -2087,26 +1675,25 @@ function save() {
 
       cycleStartAt: s.cycleStartAt,
       lastGiftIntervalSec: s.lastGiftIntervalSec,
-      giftNextAt: s.giftNextAt,
-      giftReady: s.giftReady,
-      giftFirstReadyAt: s.giftFirstReadyAt || null,
-      isIdleOffline: !!s.isIdleOffline,
+      giftNextAt: s.giftNextAt, giftReady: s.giftReady,
 
       diamonds: s.diamonds || 0,
       nextDiamondPrize: s.nextDiamondPrize,
 
-      autoDogLastAt: s.autoDogLastAt,
-      autoDogNextAt: s.autoDogNextAt,
-      autoDogBank: s.autoDogBank,
+     // auto-dog
+autoDogLastAt: s.autoDogLastAt,
+autoDogNextAt: s.autoDogNextAt,
+autoDogBank: s.autoDogBank,
+
       autoDogPending: !!s.autoDogPending,
 
       costBase: s.costBase,
       adCooldownUntil: s.adCooldownUntil || 0,
+
       pendingDiamondDogLevel: s.pendingDiamondDogLevel || null,
     }));
   } catch {}
 }
-
 
 function load() { try { const raw = localStorage.getItem(LS_KEY); return raw ? JSON.parse(raw) : null; } catch { return null; } }
 
@@ -2329,46 +1916,49 @@ function tryDistributeBankDog(s) {
   }
 }
 
+
 function handleOfflineAccrual(s, elapsedMs) {
   if (!s) return 0;
 
-  // --- Auto-dog accrual (נשאר כמו אצלך) ---
-  {
-    const period = DOG_INTERVAL_SEC * 1000;
-    const now = Date.now();
+  // Auto-dog: accrue by nextAt → bank (but PAUSE when no free slots), then try to deploy
+{
+  const period = DOG_INTERVAL_SEC * 1000;
+  const now = Date.now();
 
-    if (!s.autoDogNextAt || Number.isNaN(s.autoDogNextAt)) {
-      s.autoDogNextAt = now + period;
-    }
-
-    const freeSlots0 = Math.max(0, MAX_MINERS - countMiners(s));
-    let bankCapNow = Math.min(DOG_BANK_CAP, freeSlots0);
-
-    if (now >= s.autoDogNextAt) {
-      const intervals = Math.floor((now - s.autoDogNextAt) / period) + 1;
-      const cur = (s.autoDogBank || 0);
-      s.autoDogBank = Math.min(bankCapNow, cur + intervals);
-      s.autoDogNextAt += intervals * period;
-    }
-
-    while ((s.autoDogBank || 0) > 0 && hasFreeSlot(s)) {
-      const lvl = chooseAutoDogLevel(s);
-      const ok = spawnMiner(s, lvl);
-      if (!ok) break;
-      s.autoDogBank -= 1;
-
-      const freeNow = Math.max(0, MAX_MINERS - countMiners(s));
-      bankCapNow = Math.min(DOG_BANK_CAP, freeNow);
-      if (bankCapNow <= 0) break;
-    }
+  if (!s.autoDogNextAt || Number.isNaN(s.autoDogNextAt)) {
+    s.autoDogNextAt = now + period;
   }
 
-  // --- סימולציית אופליין לשבירות ---
+  // capacity according to CURRENT free slots
+  const freeSlots0 = Math.max(0, MAX_MINERS - countMiners(s));
+  let bankCapNow = Math.min(DOG_BANK_CAP, freeSlots0);
+
+  if (now >= s.autoDogNextAt) {
+    const intervals = Math.floor((now - s.autoDogNextAt) / period) + 1;
+    const cur = (s.autoDogBank || 0);
+    s.autoDogBank = Math.min(bankCapNow, cur + intervals);
+    s.autoDogNextAt += intervals * period;
+  }
+
+  // Try to spend bank immediately if slots exist
+  while ((s.autoDogBank || 0) > 0 && hasFreeSlot(s)) {
+    const lvl = chooseAutoDogLevel(s); // אוטו-דוג: שומר על הבחירה הרגילה שלך
+    const ok = spawnMiner(s, lvl);
+    if (!ok) break;
+    s.autoDogBank -= 1;
+
+    // Recompute capacity after placement
+    const freeNow = Math.max(0, MAX_MINERS - countMiners(s));
+    bankCapNow = Math.min(DOG_BANK_CAP, freeNow);
+    if (bankCapNow <= 0) break; // pause accrual when full
+  }
+}
+
+
+
   const CAP_MS = 12 * 60 * 60 * 1000;
   const simMs = Math.min(elapsedMs, CAP_MS);
-
   let totalCoins = 0;
-  let offlineAddedMleo = 0;
 
   for (let lane = 0; lane < LANES; lane++) {
     let dps = laneDpsSum(s, lane) * OFFLINE_DPS_FACTOR;
@@ -2381,22 +1971,11 @@ function handleOfflineAccrual(s, elapsedMs) {
 
     while (timeLeft > 0 && dps > 0) {
       const timeToBreak = hp / dps;
-
       if (timeToBreak > timeLeft) {
         hp -= dps * timeLeft;
         timeLeft = 0;
       } else {
-        // שבירה מתרחשת:
         totalCoins += Math.floor(maxHp * GOLD_FACTOR * (s.goldMult || 1));
-
-        // ערך MLEO לפי שלב הסלע בנתיב זה ברגע השבירה
-        const stageNow = (idx + 1);
-        const baseForBreak = mleoBaseForStage(stageNow);
-       const eff = addPlayerScorePoints(s, baseForBreak);
-        offlineAddedMleo += eff;
-        finalizeDailyRewardOncePerTick();
-
-        // מעבר לסלע הבא בנתיב
         timeLeft -= timeToBreak;
         idx += 1;
         const rk = newRock(lane, idx);
@@ -2408,12 +1987,21 @@ function handleOfflineAccrual(s, elapsedMs) {
     s.lanes[lane].rockCount = idx;
   }
 
-  // מצטברים למסך ה-COLLECT (האיזון של ה-Mining עודכן תוך כדי)
   if (totalCoins > 0) {
     s.pendingOfflineGold = (s.pendingOfflineGold || 0) + totalCoins;
-  }
-  if (offlineAddedMleo > 0) {
-    s.pendingOfflineMleo = +((s.pendingOfflineMleo || 0) + offlineAddedMleo).toFixed(2);
+    try {
+      const before = loadMiningState();
+      const balBefore = Number(before?.balance || 0);
+
+      addPlayerScorePoints(s, totalCoins);
+      finalizeDailyRewardOncePerTick();
+
+      const after = loadMiningState();
+      const balAfter = Number(after?.balance || 0);
+      const delta = Math.max(0, +(balAfter - balBefore).toFixed(2));
+
+      s.pendingOfflineMleo = +((s.pendingOfflineMleo || 0) + delta).toFixed(2);
+    } catch {}
   }
 
   return totalCoins;
@@ -2447,10 +2035,7 @@ async function resetGame() {
   try {
     localStorage.removeItem(LS_KEY);
     localStorage.removeItem(MINING_LS_KEY);
-
   } catch {}
-
-// (No legacy MLEO engine to reset in the new per-rock-stage model)
 
   setMining({
     balance: 0, minedToday: 0, lastDay: getTodayKey(),
@@ -2520,6 +2105,7 @@ function openDiamondChestIfReady() {
 }
 
 // HUD computed values + Gift heartbeat + EARN cooldown
+
 const DOG_INTERVAL_SEC = (typeof window !== "undefined" && window.DOG_INTERVAL_SEC) || 600;
 const DOG_BANK_CAP     = (typeof window !== "undefined" && window.DOG_BANK_CAP)     || 6;
 
@@ -2546,20 +2132,6 @@ const dogProgress = (() => {
 
 
 const diamondsReady = (stateRef.current?.diamonds || 0) >= 3;
-
-// --- ONLINE/OFFLINE HUD status (derived) ---
-const onlineMode = (() => {
-  const s = stateRef.current;
-  const paused = !!(flagsRef.current && flagsRef.current.paused);
-  const hidden = (typeof document !== "undefined") && document.visibilityState === "hidden";
-  if (!s) return "offline";
-  if (s.isIdleOffline) return "idle";          // gift ready >5m → reduced efficiency
-  if (paused || hidden) return "offline";      // intro/paused/hidden
-  return "online";
-})();
-const isOnline = onlineMode === "online";
-const onlineDotTitle = isOnline ? "Online" : (stateRef.current?.isIdleOffline ? "Idle (reduced)" : "Offline");
-
 
 function ringBg(progress){
   const p   = Math.max(0, Math.min(1, Number(progress) || 0));
@@ -2608,10 +2180,6 @@ function onAdd(){
 
 // Coins modal (details + claim-to-mining)
 const [showCoinsModal, setShowCoinsModal] = useState(false);
-
-// Legacy shim: in the new engine MLEO accrues only on rock breaks.
-// Keep a no-op to avoid ReferenceError if older UI paths still call it.
-function previewMleoFromCoins() { return 0; }
 
 function claimCoinsToMining() {
   try { play?.(S_CLICK); } catch {}
@@ -3097,31 +2665,22 @@ const BTN_DIS  = "opacity-60 cursor-not-allowed";
             MLEO — MINERS
           </h1>
 
-
         {/* Wallet status (clickable) — טוגל */}
 <div
   className="absolute z-[40]"
-  style={{ top: "0rem", left: "calc(env(safe-area-inset-left, 0px) + 36px)" }}
+  style={{ top: "0rem", left: "calc(env(safe-area-inset-left, 0px) + 42px)" }}
 >
-<button
-  onClick={toggleWallet}
-  className={[
-    "inline-flex items-center gap-1",
-    "h-4 px-1 rounded font-normal text-[9px] leading-none",
-    "backdrop-blur-sm ring-1 shadow-sm",
-    isConnected
-      ? "bg-emerald-500/20 ring-emerald-300/40 text-emerald-200"
-      : "bg-rose-500/20 ring-rose-300/40 text-rose-200"
-  ].join(" ")}
->
-  {isConnected ? (
-    <span className="w-1 h-1 rounded-full bg-emerald-400" />
-  ) : (
-    <span className="w-1 h-1 rounded-full border border-rose-500" />
-  )}
-  <span>{isConnected ? "Connected" : "Not connected"}</span>
-</button>
-
+  <button
+    onClick={toggleWallet}
+    className={`px-2 py-1 rounded-md text-xs font-semibold shadow ${
+      isConnected
+        ? "bg-emerald-500 hover:bg-emerald-600 text-white" // מחובר = ירוק
+        : "bg-rose-500 hover:bg-rose-600 text-white"      // לא מחובר = אדום
+    }`}
+    title={isConnected ? "Tap to disconnect wallet" : "Tap to connect wallet"}
+  >
+    {isConnected ? "connected" : "Connect"}
+  </button>
 </div>
 
 
@@ -3152,34 +2711,27 @@ const BTN_DIS  = "opacity-60 cursor-not-allowed";
           `}</style>
 
           <div className="flex gap-2 flex-wrap justify-center items-center text-sm">
-            {/* Coins + status dot + ad ring */}
+            {/* Coins + ad ring */}
             <button
               onClick={()=>setHudModal('coins')}
               className="px-2 py-1 rounded-lg flex items-center gap-2 hover:bg-white/10"
               aria-label="Coins info"
             >
-
-{/* ONLINE/OFFLINE dot — placed to the LEFT of the coin */}
-              <div
-                className="w-2.5 h-2.5 rounded-full ring-2 ring-black/40"
-                title={onlineDotTitle}
-                style={{ backgroundColor: isOnline ? "#22c55e" : (stateRef.current?.isIdleOffline ? "#f59e0b" : "#94a3b8") }}
-              />
               <div className="relative w-8 h-8 rounded-full grid place-items-center" title={addRemainMs > 0 ? `Next ad in ${addRemainLabel}` : "Ad bonus ready"}>
                 <div className="absolute inset-0 rounded-full" style={ringBg(addProgress)} />
                 <img src={IMG_COIN} alt="coin" className="w-7 h-7" />
               </div>
-              <b>{formatShort1(stateRef.current?.gold ?? 0)}</b>
+              <b>{formatShort(stateRef.current?.gold ?? 0)}</b>
             </button>
 
             {/* DPS */}
             <button onClick={()=>setHudModal('dps')} className="px-2 py-1 rounded-lg hover:bg-white/10">
-              🪓 x<b>{(stateRef.current?.dpsMult || 1).toFixed(1)}</b>
+              🪓 x<b>{(stateRef.current?.dpsMult || 1).toFixed(2)}</b>
             </button>
 
             {/* GOLD */}
             <button onClick={()=>setHudModal('gold')} className="px-2 py-1 rounded-lg hover:bg-white/10">
-              🟡 x<b>{(stateRef.current?.goldMult || 1).toFixed(1)}</b>
+              🟡 x<b>{(stateRef.current?.goldMult || 1).toFixed(2)}</b>
             </button>
 
             {/* Spawn LV (with inline counter) */}
@@ -3229,7 +2781,7 @@ const BTN_DIS  = "opacity-60 cursor-not-allowed";
 
             {/* Phase label */}
             <button onClick={()=>setHudModal('gifts')} className="px-2 py-1 rounded-lg hover:bg-white/10">
-              {`⏳ ${(_getPhaseInfo(stateRef.current, Date.now()).intervalSec)}s `}
+              {`⏳ ${(_getPhaseInfo(stateRef.current, Date.now()).intervalSec)}s gifts`}
             </button>
 
             <div className="flex items-center gap-3 ml-2">
@@ -3321,7 +2873,7 @@ const BTN_DIS  = "opacity-60 cursor-not-allowed";
 
 {/* שורה שנייה – רק המחיר, ממוקם בקצה הימני */}
 <div className="!text-[14px] md:!text-[16px] mt-0.5 tabular-nums font-extrabold leading-tight self-end mr-1">
-  {formatShort1(spawnCostNow)}
+  {formatShort(spawnCostNow)}
 </div>
 
 
@@ -3334,19 +2886,20 @@ const BTN_DIS  = "opacity-60 cursor-not-allowed";
   onClick={upgradeDps}
   disabled={!canBuyDps}
   className={`${BTN_BASE} ${BTN_H_FIX} ${BTN_W_FIX} ${
-        canBuyDps
-      ? "bg-sky-500 hover:bg-sky-400 ring-sky-300 text-slate-900"
+    canBuyDps
+? "bg-sky-500 hover:bg-sky-400 ring-sky-300 text-slate-900"
       : `bg-sky-500 ring-sky-300 text-slate-900 ${BTN_DIS}`
   }`}
 >
   <div className="flex flex-col items-center justify-center leading-tight">
     <div className="flex items-center gap-1">
       <span>🪓</span>
-      <span className="font-extrabold">+10%</span>
+      <span>+10%</span>
     </div>
-    <div className="!text-[14px] md:!text-[16px] mt-0.5 tabular-nums font-extrabold leading-tight self-end mr-1">
-      {formatShort1(dpsCostNow)}
-    </div>
+    <div className="!text-[14px] md:!text-[16px] mt-0.5 tabular-nums font-extrabold leading-tight">
+  {formatShort(dpsCostNow)}
+</div>
+
   </div>
 </button>
 
@@ -3356,20 +2909,28 @@ const BTN_DIS  = "opacity-60 cursor-not-allowed";
   disabled={!canBuyGold}
   className={`${BTN_BASE} ${BTN_H_FIX} ${BTN_W_FIX} ${
     canBuyGold
-      ? "bg-amber-400 hover:bg-amber-300 ring-amber-300 text-slate-900"
+       ? "bg-amber-400 hover:bg-amber-300 ring-amber-300 text-slate-900"
       : `bg-amber-400 ring-amber-300 text-slate-900 ${BTN_DIS}`
   }`}
 >
   <div className="flex flex-col items-center justify-center leading-tight">
     <div className="flex items-center gap-1">
-      <span>🟡</span>
-      <span className="font-extrabold">+10%</span>
+      <img
+  src="/images/silver.png"
+  alt="Lio"
+  className="w-5 h-5 inline-block"
+/>
+
+      <span>+10%</span>
     </div>
-    <div className="!text-[14px] md:!text-[16px] mt-0.5 tabular-nums font-extrabold leading-tight self-end mr-1">
-      {formatShort1(goldCostNow)}
-    </div>
+    <div className="!text-[14px] md:!text-[16px] mt-0.5 tabular-nums font-extrabold leading-tight">
+  {formatShort(goldCostNow)}
+
+</div>
+
   </div>
 </button>
+
 
                 </div>
 
@@ -3406,32 +2967,31 @@ const BTN_DIS  = "opacity-60 cursor-not-allowed";
     }`}
     style={(mining?.balance || 0) > 0 ? { animation: "nudge 1.8s ease-in-out infinite" } : undefined}
   >
-    {formatMleoShort1(mining?.balance || 0)} MLEO
+    {formatMleoShort(mining?.balance || 0)} MLEO
 
   </span>
 </button>
 
 
               <button
-  onClick={claimBalanceToVaultDemo}
-  disabled={(mining?.balance || 0) <= 0}
-  className={`relative px-2.5 py-1 rounded-md font-extrabold transition active:scale-95
-    ${(mining?.balance || 0) > 0
-      ? "bg-yellow-400 hover:bg-yellow-300 text-black cursor-pointer"
-      : "bg-slate-500 text-white/70 cursor-not-allowed"
-    }`}
-  title={(mining?.balance || 0) > 0 ? "Move to VAULT (internal)" : "No tokens to claim"}
->
-  {(mining?.balance || 0) > 0 && (
-    <span
-      aria-hidden
-      className="absolute -inset-1 rounded-lg"
-      style={{ animation: "btnPulse 1.8s ease-in-out infinite" }}
-    />
-  )}
-  CLAIM
-</button>
-
+                onClick={onClaimMined}
+                disabled={claiming || (mining?.balance || 0) <= 0}
+                className={`relative px-2.5 py-1 rounded-md font-extrabold transition active:scale-95
+                  ${(mining?.balance || 0) > 0 && !claiming
+                    ? "bg-yellow-400 hover:bg-yellow-300 text-black cursor-pointer"
+                    : "bg-slate-500 text-white/70 cursor-not-allowed"
+                  }`}
+                title={(mining?.balance || 0) > 0 ? "Claim" : "No tokens to claim"}
+              >
+                {(mining?.balance || 0) > 0 && !claiming && (
+                  <span
+                    aria-hidden
+                    className="absolute -inset-1 rounded-lg"
+                    style={{ animation: "btnPulse 1.8s ease-in-out infinite" }}
+                  />
+                )}
+                CLAIM
+              </button>
 
               {/* VAULT */}
               <button
@@ -3439,7 +2999,9 @@ const BTN_DIS  = "opacity-60 cursor-not-allowed";
                 className="ml-2 text-gray-300 hover:text-white underline-offset-2 hover:underline"
                 title="Open Mining"
               >
-Vault: <b className="text-cyan-300 tabular-nums">{formatMleoShort1(mining?.vault || 0)}</b> MLEO
+Vault: <b className="text-cyan-300 tabular-nums">
+  {formatMleoVault(mining?.vault || 0)}
+</b> MLEO
 
 
               </button>
@@ -3537,7 +3099,7 @@ MLEO
       {showResetConfirm && (
         <div className="fixed inset-0 z-[10000] bg-black/80 flex items-center justify-center p-4">
           <div className="bg-white text-slate-900 max-w-md w-full rounded-2xl p-6 shadow-2xl">
-            <h2 className="text-2xl font-extrabold mb-2">Reset Progress?</h2>
+            <h2 className="text-2xl font-extrabולד mb-2">Reset Progress?</h2>
             <p className="text-sm text-slate-700 mb-4">
               This will permanently delete your save and send you back to the start.
             </p>
@@ -3944,7 +3506,7 @@ MLEO
                 Close
               </button>
               <button
-                onClick={claimBalanceToVaultDemo}
+                onClick={onClaimMined}
                 disabled={claiming || (Number(mining?.balance || 0) <= 0)}
                 className={`px-4 py-2 rounded-lg font-extrabold ${
                   (Number(mining?.balance || 0) > 0) && !claiming
@@ -4038,32 +3600,28 @@ MLEO
                     {isConnected ? "WALLET" : "CONNECT WALLET"}
                   </button>
 
-                 <button
-  onClick={onClaimMined}
-  disabled={
-    claiming ||
-    // צריך שיהיה משהו ב-Vault
-    (Number((mining?.vault || 0).toFixed(2)) <= 0) ||
-    // אם לא בעקיפת טסטנט — אל תאפשר כשאין room לפי הלו״ז
-    (TOKEN_LIVE && !(ALLOW_TESTNET_WALLET_FLAG && chainId === CLAIM_CHAIN_ID) && (remainingWalletClaimRoom() <= 0))
-  }
-  className={`px-3 py-1.5 rounded-lg font-extrabold text-xs active:scale-95 ${
-    (!claiming &&
-      Number((mining?.vault || 0).toFixed(2)) > 0 &&
-      ((ALLOW_TESTNET_WALLET_FLAG && chainId === CLAIM_CHAIN_ID) || remainingWalletClaimRoom() > 0)
-    )
-      ? "bg-yellow-400 hover:bg-yellow-300 text-black"
-      : "bg-slate-300 text-slate-500 cursor-not-allowed"
-  }`}
-  title={
-    (ALLOW_TESTNET_WALLET_FLAG && chainId === CLAIM_CHAIN_ID)
-      ? "Claim to Wallet (testnet override)"
-      : (remainingWalletClaimRoom() > 0 ? "Claim to Wallet" : "Wallet claim locked")
-  }
->
-  CLAIM TO WALLET
-</button>
-
+                  <button
+                    onClick={onClaimMined}
+                    disabled={
+                      claiming ||
+                      bal <= 0 ||
+                      (TOKEN_LIVE && (!canWallet || !hasRoom))
+                    }
+                    className={`px-3 py-1.5 rounded-lg font-extrabold text-xs active:scale-95 ${
+                      (!TOKEN_LIVE || (canWallet && hasRoom && bal > 0)) && !claiming
+                        ? "bg-yellow-400 hover:bg-yellow-300 text-black"
+                        : "bg-slate-300 text-slate-500 cursor-not-allowed"
+                    }`}
+                    title={
+                      !TOKEN_LIVE
+                        ? "Claim to Vault (demo)"
+                        : canWallet
+                          ? (hasRoom ? "Claim to Wallet" : "No wallet claim room yet")
+                          : "Wallet claim locked"
+                    }
+                  >
+                    {TOKEN_LIVE ? "CLAIM TO WALLET" : "CLAIM TO VAULT"}
+                  </button>
                 </div>
 
                 {TOKEN_LIVE && (

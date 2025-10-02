@@ -5,9 +5,10 @@
 import { useEffect, useRef, useState } from "react";
 import Layout from "../components/Layout";
 import { useConnectModal, useAccountModal } from "@rainbow-me/rainbowkit";
-import { useAccount, useDisconnect, useSwitchChain, useWriteContract, usePublicClient, useChainId } from "wagmi";
- import { parseUnits } from "viem";
+import { useAccount, useDisconnect, useWriteContract, useWaitForTransactionReceipt } from "wagmi";
 import { useRouter } from "next/router";
+import { parseUnits } from "viem";
+
 
 
 // --- iOS 100vh fix (sets --app-100vh = window.innerHeight) ---
@@ -49,9 +50,9 @@ const LANES = 4;
 const SLOTS_PER_LANE = 4;
 const MAX_MINERS = LANES * SLOTS_PER_LANE;
 const PADDING = 6;
-const LS_KEY = "mleoMiners_v5_84";
+const LS_KEY = "mleoMiners_v5_83_reset5";
 // First–play terms acceptance gate (global versioned)
-const TERMS_VERSION = "v1.5"; // ⬅️ bump to force re-accept if text changes
+const TERMS_VERSION = "v1.4"; // ⬅️ bump to force re-accept if text changes
 const TERMS_KEY = `mleoMiners_termsAccepted_${TERMS_VERSION}`;
 
 // Assets
@@ -68,33 +69,18 @@ const S_MERGE = "/sounds/merge.mp3";
 const S_ROCK  = "/sounds/rock.mp3";
 const S_GIFT  = "/sounds/gift.mp3";
 
-// ==== On-chain Claim (TBNB) config ====
-const CLAIM_CHAIN_ID = Number(process.env.NEXT_PUBLIC_CLAIM_CHAIN_ID || 97); // BSC Testnet
+// --- On-chain claim toggles (shared across both sites) ---
+const ONCHAIN_MODE   = process.env.NEXT_PUBLIC_ONCHAIN_MODE === "1";
+const CLAIM_ADDRESS  = process.env.NEXT_PUBLIC_CLAIM_ADDRESS;
+const CLAIM_CHAIN_ID = Number(process.env.NEXT_PUBLIC_CLAIM_CHAIN_ID || 11155111); // default: Sepolia
+const CLAIM_DECIMALS = Number(process.env.NEXT_PUBLIC_CLAIM_DECIMALS || 18);
+const FORCE_WALLET_CLAIM = process.env.NEXT_PUBLIC_FORCE_WALLET_CLAIM === "1";
 
-// אין כתובת ברירת מחדל! חייבים לספק כתובת חדשה דרך ENV
-const CLAIM_ADDRESS = (process.env.NEXT_PUBLIC_MLEO_CLAIM_ADDRESS || process.env.NEXT_PUBLIC_CLAIM_ADDRESS || "").trim();
-const MLEO_DECIMALS  = Number(process.env.NEXT_PUBLIC_MLEO_DECIMALS || 18);
-const CLAIM_FN       = (process.env.NEXT_PUBLIC_MLEO_CLAIM_FN || "claim").toLowerCase();
-
-function isValidAddress(a){
-  return /^0x[0-9a-fA-F]{40}$/.test(a || "");
-}
-
-
-const CLAIM_ABI_MAP = {
-  claim:  [{ type:"function", name:"claim",  stateMutability:"nonpayable", inputs:[{name:"amount", type:"uint256"}], outputs:[] }],
-  mint:   [{ type:"function", name:"mint",   stateMutability:"nonpayable", inputs:[{name:"to", type:"address"}, {name:"amount", type:"uint256"}], outputs:[] }],
-  mintto: [{ type:"function", name:"mintTo", stateMutability:"nonpayable", inputs:[{name:"to", type:"address"}, {name:"amount", type:"uint256"}], outputs:[] }],
-};
-const GAME_ID = Number(process.env.NEXT_PUBLIC_GAME_ID || 1);
-
-
-// אפשר להפעיל עקיפה לטסטנט כדי להתעלם מגייטינג של TGE — רק במודל MINING
-const ALLOW_TESTNET_WALLET_FLAG =
-  (process.env.NEXT_PUBLIC_ALLOW_TESTNET_WALLET || "").toLowerCase() === "1" ||
-  (process.env.NEXT_PUBLIC_ALLOW_TESTNET_WALLET || "").toLowerCase() === "true";
-
-
+// Minimal ABI for claim(amount)
+const CLAIM_ABI = [
+  { type: "function", name: "claim", stateMutability: "nonpayable",
+    inputs: [{ name: "amount", type: "uint256" }], outputs: [] }
+];
 
 // ===== Debug helpers =====
  const DEBUG_LS = "MLEO_DEBUG_UI";
@@ -410,7 +396,7 @@ const PRESALE_START_MS = null;
 const PRESALE_DURATION_DAYS = 0;             
 
 // TGE: 2026-01-01 00:00:00Z
-const TGE_MS = Date.UTC(2024, 0, 1, 0, 0, 0);
+const TGE_MS = Date.UTC(2026, 0, 1, 0, 0, 0);
 
 const TOKEN_LIVE = true;
 
@@ -601,6 +587,7 @@ function currentClaimPct(now=Date.now()){
   return pct;
 }
 function walletClaimEnabled(now=Date.now()){
+if (FORCE_WALLET_CLAIM) return true; // development override (keeps UI identical)
   const m = monthsSinceTGE(now);
   return TOKEN_LIVE && m!==null && m>=1; // מותר מחודש אחרי TGE
 }
@@ -659,12 +646,11 @@ const router = useRouter();
   const flagsRef = useRef({ isMobileLandscape: false, paused: true });
   const { openConnectModal } = useConnectModal();
   const { openAccountModal } = useAccountModal();
-  const { address, isConnected } = useAccount();
-const chainId = useChainId();
- const { switchChain } = useSwitchChain();
- const publicClient = usePublicClient();
- const { writeContractAsync } = useWriteContract();
-const { disconnect } = useDisconnect();
+const { address, isConnected } = useAccount();
+  const { disconnect } = useDisconnect();
+  const { writeContract, data: claimTxHash, isPending: claimPending } = useWriteContract();
+  const { isLoading: claimMining, isSuccess: claimMined } = useWaitForTransactionReceipt({ hash: claimTxHash });
+ 
 
   const [ui, setUi] = useState({
     gold: 0,
@@ -867,202 +853,52 @@ const { disconnect } = useDisconnect();
     setMenuOpen(false);
   }
 
-// === MINING: CLAIM (איסוף כולל → לארנק) ===
-// חשוב: רק הכפתור בתוך מסך MINING עושה "איסוף כולל לארנק".
-// שני כפתורי CLAIM אחרים באפליקציה לא מושפעים.
+// CLAIM: on-chain when enabled, otherwise same Vault demo
 async function onClaimMined() {
-  try { play?.(S_CLICK); } catch {}
+  const bal = Number(mining?.balance || 0);
+  if (!bal) { setGiftToastWithTTL("No tokens to claim"); return; }
 
-  // 0) קודם לאסוף את ה-balance המקומי אל ה-Vault
-  try {
-    const st0 = loadMiningState();
-    const bal = Number((st0?.balance || 0).toFixed(2));
-    if (bal > 0) {
-      st0.vault        = Number(((st0.vault || 0) + bal).toFixed(2));
-      st0.claimedTotal = Number(((st0.claimedTotal || 0) + bal).toFixed(2));
-      st0.history      = Array.isArray(st0.history) ? st0.history : [];
-      st0.history.unshift({ ts: Date.now(), amt: bal, type: "to_vault" });
-      st0.balance = 0;
-      saveMiningState(st0);
-      setMining(st0);
-    }
-  } catch {}
-
-  // 1) מצב Vault כעת
-  const st = loadMiningState();
-  const vaultNow = Number((st?.vault || 0).toFixed(2));
-  if (!vaultNow) { setGiftToastWithTTL("Vault is empty"); return; }
-
-  // 2) חיבור + רשת
-  if (!isConnected) { openConnectModal?.(); return; }
-  if (chainId !== CLAIM_CHAIN_ID) {
-    try { await switchChain?.({ chainId: CLAIM_CHAIN_ID }); }
-    catch { setGiftToastWithTTL("Switch to BSC Testnet (TBNB)"); return; }
-  }
-
-  // 3) בדיקת כתובת חוזה – חובה ENV תקין
-  if (!isValidAddress(CLAIM_ADDRESS)) {
-    setGiftToastWithTTL("Missing/invalid CLAIM address (set NEXT_PUBLIC_MLEO_CLAIM_ADDRESS)");
+  const canOnchain = ONCHAIN_MODE && isConnected && CLAIM_ADDRESS;
+  if (!canOnchain) {
+    // Fallback to existing demo behavior (no UI changes)
+    claimBalanceToVaultDemo();
     return;
   }
 
-  // ABI מינימלי עבור claim(amount)
- const MINING_CLAIM_ABI = [
-  {
-    type: "function",
-    name: "claim",
-    stateMutability: "nonpayable",
-    inputs: [
-      { name: "gameId", type: "uint256" },
-      { name: "amount", type: "uint256" }
-    ],
-    outputs: []
-  }
-];
-
-
-  // 4) "הכול עכשיו": מושכים את כל ה-Vault לארנק
-  const toClaim = vaultNow;
-  setClaiming(true);
   try {
-    const amountWei = parseUnits(
-      Number(toClaim).toFixed(Math.min(2, MLEO_DECIMALS)),
-      MLEO_DECIMALS
-    );
-
-    const hash = await writeContractAsync({
+    const amt = parseUnits(bal.toFixed(2), CLAIM_DECIMALS);
+    writeContract({
       address: CLAIM_ADDRESS,
-      abi: MINING_CLAIM_ABI,
+      abi: CLAIM_ABI,
       functionName: "claim",
-      args: [BigInt(GAME_ID), amountWei],
-
+      args: [amt],
       chainId: CLAIM_CHAIN_ID,
-      account: address,
     });
-
-    await publicClient.waitForTransactionReceipt({ hash });
-
-    // 5) עדכון לוקאלי לאחר המשיכה
-    const after = loadMiningState();
-    const delta = Number(toClaim);
-    after.vault           = Math.max(0, Number(((after.vault || 0) - delta).toFixed(2)));
-    after.claimedToWallet = Number(((after.claimedToWallet || 0) + delta).toFixed(2));
-    after.history = Array.isArray(after.history) ? after.history : [];
-    after.history.unshift({ t: Date.now(), kind: "claim_wallet_all", amount: delta, tx: String(hash) });
-    saveMiningState(after);
-    setMining(after);
-    setCenterPopup?.({ text: `✅ Sent ${formatMleoShort(delta)} MLEO to wallet`, id: Math.random() });
-  } catch (err) {
-    console.error(err);
-    setGiftToastWithTTL("Claim failed or rejected");
-  } finally {
-    setClaiming(false);
+  } catch (e) {
+    setGiftToastWithTTL("On-chain claim failed");
   }
 }
 
-
-async function onClaimMinedToWallet() {
-  try { play?.(S_CLICK); } catch {}
-  const st = loadMiningState();
-
-  // מושכים מה-Vault, לא מה-Balance
-  const vaultNow = Number((st?.vault || 0).toFixed(6));
-  if (!vaultNow) { setGiftToastWithTTL("Vault is empty"); return; }
-
-  if (!isConnected) { openConnectModal?.(); return; }
-
-  // להבטיח רשת TBNB
-  if (chainId !== CLAIM_CHAIN_ID) {
-    try { await switchChain?.({ chainId: CLAIM_CHAIN_ID }); }
-    catch { setGiftToastWithTTL("Switch to BSC Testnet (TBNB)"); return; }
-    // אל תחזור אוטומטית; אם המשתמש חזר לאפליקציה על אותה רשת – נמשיך.
-  }
-
-  if (!CLAIM_ADDRESS) { setGiftToastWithTTL("Missing CLAIM address"); return; }
-
-  // חישוב כמה מותר למשוך:
-  const testnetOverride = (ALLOW_TESTNET_WALLET_FLAG && chainId === CLAIM_CHAIN_ID);
-  const room = testnetOverride ? vaultNow : Math.max(0, remainingWalletClaimRoom());
-  const toClaim = Math.min(vaultNow, Number(room.toFixed ? room.toFixed(6) : room));
-
-  if (!toClaim) {
-    setGiftToastWithTTL(testnetOverride ? "Nothing to claim" : "Wallet claim locked");
-    return;
-  }
-
-  setClaiming(true);
+// When on-chain claim is mined, mirror local UX like Vault
+useEffect(() => {
+  if (!claimTxHash || !claimMined) return;
   try {
-    const amountWei = parseUnits(
-      Number(toClaim).toFixed(Math.min(6, MLEO_DECIMALS)),
-      MLEO_DECIMALS
-    );
-    const fn   = CLAIM_FN === "mintto" ? "mintTo" : CLAIM_FN;
-    const args = (fn === "claim") ? [amountWei] : [address, amountWei];
-    const abi  = (fn === "claim")
-      ? [{ type:"function", name:"claim",  stateMutability:"nonpayable", inputs:[{name:"amount", type:"uint256"}], outputs:[] }]
-      : [{ type:"function", name:"mintTo", stateMutability:"nonpayable", inputs:[{name:"to", type:"address"}, {name:"amount", type:"uint256"}], outputs:[] }];
+    const st = loadMiningState();
+    const amt = Number(st?.balance || 0);
+    if (amt > 0) {
+      st.vault           = Number(((st.vault || 0) + amt).toFixed(2));
+      st.claimedTotal    = Number(((st.claimedTotal || 0) + amt).toFixed(2));
+      st.claimedToWallet = Number(((st.claimedToWallet || 0) + amt).toFixed(2));
+      st.history         = Array.isArray(st.history) ? st.history : [];
+      st.history.unshift({ ts: Date.now(), amt, type: "to_wallet" });
+      st.balance = 0;
+      saveMiningState(st);
+      setMining(st);
+      setGiftToastWithTTL(`Claimed ${formatMleoShort(amt)} MLEO to wallet`);
+    }
+  } finally {}
+}, [claimTxHash, claimMined]);
 
-    // simulate (חשוב במובייל)
-    await publicClient.simulateContract({
-      address: CLAIM_ADDRESS,
-      abi,
-      functionName: fn,
-      args,
-      account: address,
-    });
-
-    // שליחה
-    const hash = await writeContractAsync({
-      address: CLAIM_ADDRESS,
-      abi,
-      functionName: fn,
-      args,
-      chainId: CLAIM_CHAIN_ID,
-    });
-
-    // פידבק מידי + עדכון אופטימי כדי למנוע כפילויות
-    const afterSend = loadMiningState();
-    const delta = Number(toClaim);
-    afterSend.vault           = Math.max(0, Number(((afterSend.vault || 0) - delta).toFixed(6)));
-    afterSend.claimedToWallet = Number(((afterSend.claimedToWallet || 0) + delta).toFixed(6));
-    afterSend.history         = Array.isArray(afterSend.history) ? afterSend.history : [];
-    afterSend.history.unshift({ t: Date.now(), kind: "claim_wallet_all_sent", amount: delta, tx: String(hash) });
-    afterSend.pendingWalletTx = String(hash);
-    afterSend.pendingWalletAmt = delta;
-    saveMiningState(afterSend);
-    setMining(afterSend);
-    setCenterPopup?.({ text: `⏳ Sent ${formatMleoShort(delta)} MLEO to wallet…`, id: Math.random() });
-
-    // אישור טרנזקציה
-    await publicClient.waitForTransactionReceipt({ hash });
-
-    // סימון הושלם + עדכון היסטוריה
-    const after = loadMiningState();
-    after.pendingWalletTx = null;
-    after.pendingWalletAmt = 0;
-    after.history = Array.isArray(after.history) ? after.history : [];
-    after.history.unshift({ t: Date.now(), kind: "claim_wallet_all_ok", amount: delta, tx: String(hash) });
-    saveMiningState(after);
-    setMining(after);
-    setCenterPopup?.({ text: `✅ Claimed ${formatMleoShort(delta)} MLEO to wallet`, id: Math.random() });
-  } catch (err) {
-    // רולבק אם צריך
-    try {
-      const st2 = loadMiningState();
-      if (st2?.pendingWalletAmt) {
-        st2.vault           = Number(((st2.vault || 0) + st2.pendingWalletAmt).toFixed(6));
-        st2.claimedToWallet = Math.max(0, Number(((st2.claimedToWallet || 0) - st2.pendingWalletAmt).toFixed(6)));
-        st2.history.unshift({ t: Date.now(), kind: "claim_wallet_all_rollback", amount: st2.pendingWalletAmt });
-        st2.pendingWalletTx = null; st2.pendingWalletAmt = 0;
-        saveMiningState(st2); setMining(st2);
-      }
-    } catch {}
-    console.error(err);
-    setGiftToastWithTTL("Claim failed or rejected");
-  } finally {
-    setClaiming(false);
-  }
-}
 
   // Debug live values (קיים אצלך — לא נוגע)
   const [debugVals, setDebugVals] = useState({
@@ -3413,25 +3249,24 @@ const BTN_DIS  = "opacity-60 cursor-not-allowed";
 
 
               <button
-  onClick={claimBalanceToVaultDemo}
-  disabled={(mining?.balance || 0) <= 0}
-  className={`relative px-2.5 py-1 rounded-md font-extrabold transition active:scale-95
-    ${(mining?.balance || 0) > 0
-      ? "bg-yellow-400 hover:bg-yellow-300 text-black cursor-pointer"
-      : "bg-slate-500 text-white/70 cursor-not-allowed"
-    }`}
-  title={(mining?.balance || 0) > 0 ? "Move to VAULT (internal)" : "No tokens to claim"}
->
-  {(mining?.balance || 0) > 0 && (
-    <span
-      aria-hidden
-      className="absolute -inset-1 rounded-lg"
-      style={{ animation: "btnPulse 1.8s ease-in-out infinite" }}
-    />
-  )}
-  CLAIM
-</button>
-
+                onClick={onClaimMined}
+                disabled={claiming || (mining?.balance || 0) <= 0}
+                className={`relative px-2.5 py-1 rounded-md font-extrabold transition active:scale-95
+                  ${(mining?.balance || 0) > 0 && !claiming
+                    ? "bg-yellow-400 hover:bg-yellow-300 text-black cursor-pointer"
+                    : "bg-slate-500 text-white/70 cursor-not-allowed"
+                  }`}
+                title={(mining?.balance || 0) > 0 ? "Claim" : "No tokens to claim"}
+              >
+                {(mining?.balance || 0) > 0 && !claiming && (
+                  <span
+                    aria-hidden
+                    className="absolute -inset-1 rounded-lg"
+                    style={{ animation: "btnPulse 1.8s ease-in-out infinite" }}
+                  />
+                )}
+                CLAIM
+              </button>
 
               {/* VAULT */}
               <button
@@ -3944,7 +3779,7 @@ MLEO
                 Close
               </button>
               <button
-                onClick={claimBalanceToVaultDemo}
+                onClick={onClaimMined}
                 disabled={claiming || (Number(mining?.balance || 0) <= 0)}
                 className={`px-4 py-2 rounded-lg font-extrabold ${
                   (Number(mining?.balance || 0) > 0) && !claiming
@@ -4038,32 +3873,28 @@ MLEO
                     {isConnected ? "WALLET" : "CONNECT WALLET"}
                   </button>
 
-                 <button
-  onClick={onClaimMined}
-  disabled={
-    claiming ||
-    // צריך שיהיה משהו ב-Vault
-    (Number((mining?.vault || 0).toFixed(2)) <= 0) ||
-    // אם לא בעקיפת טסטנט — אל תאפשר כשאין room לפי הלו״ז
-    (TOKEN_LIVE && !(ALLOW_TESTNET_WALLET_FLAG && chainId === CLAIM_CHAIN_ID) && (remainingWalletClaimRoom() <= 0))
-  }
-  className={`px-3 py-1.5 rounded-lg font-extrabold text-xs active:scale-95 ${
-    (!claiming &&
-      Number((mining?.vault || 0).toFixed(2)) > 0 &&
-      ((ALLOW_TESTNET_WALLET_FLAG && chainId === CLAIM_CHAIN_ID) || remainingWalletClaimRoom() > 0)
-    )
-      ? "bg-yellow-400 hover:bg-yellow-300 text-black"
-      : "bg-slate-300 text-slate-500 cursor-not-allowed"
-  }`}
-  title={
-    (ALLOW_TESTNET_WALLET_FLAG && chainId === CLAIM_CHAIN_ID)
-      ? "Claim to Wallet (testnet override)"
-      : (remainingWalletClaimRoom() > 0 ? "Claim to Wallet" : "Wallet claim locked")
-  }
->
-  CLAIM TO WALLET
-</button>
-
+                  <button
+                    onClick={onClaimMined}
+                    disabled={
+                      claiming ||
+                      bal <= 0 ||
+                      (TOKEN_LIVE && (!canWallet || !hasRoom))
+                    }
+                    className={`px-3 py-1.5 rounded-lg font-extrabold text-xs active:scale-95 ${
+                      (!TOKEN_LIVE || (canWallet && hasRoom && bal > 0)) && !claiming
+                        ? "bg-yellow-400 hover:bg-yellow-300 text-black"
+                        : "bg-slate-300 text-slate-500 cursor-not-allowed"
+                    }`}
+                    title={
+                      !TOKEN_LIVE
+                        ? "Claim to Vault (demo)"
+                        : canWallet
+                          ? (hasRoom ? "Claim to Wallet" : "No wallet claim room yet")
+                          : "Wallet claim locked"
+                    }
+                  >
+                    {TOKEN_LIVE ? "CLAIM TO WALLET" : "CLAIM TO VAULT"}
+                  </button>
                 </div>
 
                 {TOKEN_LIVE && (
