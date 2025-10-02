@@ -3,26 +3,23 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/router";
 import Header from "./Header";
 import { Footer } from "./Header";
-import FullscreenButton from "./FullscreenButton";
-import SettingsButton from "./SettingsButton";
-import BackButton from "./BackButton";
-import dynamic from "next/dynamic";
 
-// נטען דינמי כדי להימנע מ-SSR בעייתי
-const SettingsModal = dynamic(() => import("./SettingsModal"), { ssr: false });
+
+// הוסר: Back/Settings/Fullscreen + SettingsModal
 
 export default function Layout({ children, video }) {
   const videoRef = useRef(null);
   const router = useRouter();
 
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  // הוסר: settingsOpen / modal
 
   // זיהוי עמודים
   const isGameHub = router.pathname === "/game";
   const isSubGame = router.pathname.startsWith("/mleo-");
+const isPresale = router.pathname === "/presale"; // לא להציג כפתור בעמוד הפריסייל
   const headerShown = !isSubGame;
   const footerShown = !isSubGame && !isGameHub;
-  const showButtons = isSubGame;
+ 
 
   useEffect(() => {
     if (videoRef.current) {
@@ -40,8 +37,6 @@ export default function Layout({ children, video }) {
     }
   }, [headerShown]);
 
-  // מיקום הכפתורים: עם Header – מתחתיו, בלי Header – ממש למעלה
-  const TOP_OFFSET = headerShown ? 66 : 16;
 
   return (
     <div className="relative w-full min-h-[var(--app-100vh,100svh)] text-white overflow-hidden">
@@ -61,30 +56,14 @@ export default function Layout({ children, video }) {
 
       {headerShown && <Header />}
 
-      {showButtons && (
-        <>
-          {/* שמאל: Back */}
-          <BackButton topOffset={TOP_OFFSET} leftOffsetPx={16} />
-
-          {/* ימין: Settings + Fullscreen */}
-          <SettingsButton
-            topOffset={TOP_OFFSET}
-            rightOffsetPx={16}
-            onClick={() => setSettingsOpen(true)}
-          />
-          <FullscreenButton
-            topOffset={TOP_OFFSET}
-            rightOffsetPx={64}
-          />
-        </>
-      )}
+ 
 
       {/* padding-top רק אם יש Header */}
       <main className={`relative z-10 ${headerShown ? "pt-[65px]" : "pt-0"}`}>
         {children}
       </main>
 
-      {!isGameHub && !isSubGame && (
+      {!isGameHub && !isSubGame && !isPresale && (
         <a
           href="/presale"
           className="fixed bottom-4 left-4 bg-yellow-500 hover:bg-yellow-600
@@ -95,11 +74,8 @@ export default function Layout({ children, video }) {
         </a>
       )}
 
-   {footerShown && <Footer />}
+    {footerShown && <Footer />}
 
-      {showButtons && (
-        <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
-      )}
     </div>
   );
 }
